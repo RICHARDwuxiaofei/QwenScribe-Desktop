@@ -141,20 +141,11 @@ jobs:
             $forbidden | ForEach-Object { Write-Error "Model leaked into build: $($_.FullName)" }
             throw "Packaged output contains model weights."
           }
-          Compress-Archive `
-            -Path dist/QwenScribeDesktop `
-            -DestinationPath dist/QwenScribe-Desktop-Windows-x64.zip `
-            -CompressionLevel Optimal
-          $zip = Get-Item dist/QwenScribe-Desktop-Windows-x64.zip
-          if ($zip.Length -ge 1900MB) {
-            Remove-Item -LiteralPath $zip.FullName
-            & 7z a -t7z -mx=7 -v1900m `
-              dist/QwenScribe-Desktop-Windows-x64.7z `
-              dist/QwenScribeDesktop
-            if ($LASTEXITCODE -ne 0) { throw "7-Zip split archive failed." }
-          }
+          & 7z a -t7z -mx=3 -mmt=on -v1800m `
+            dist/QwenScribe-Desktop-Windows-x64.7z `
+            dist/QwenScribeDesktop
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip split archive failed." }
           $assets = Get-ChildItem dist -File | Where-Object {
-            $_.Name -like "QwenScribe-Desktop-Windows-x64.zip" -or
             $_.Name -like "QwenScribe-Desktop-Windows-x64.7z.*"
           }
           if (-not $assets) { throw "No release archive was generated." }
@@ -171,7 +162,6 @@ jobs:
         with:
           name: QwenScribe-Desktop-Windows-x64
           path: |
-            dist/QwenScribe-Desktop-Windows-x64.zip
             dist/QwenScribe-Desktop-Windows-x64.7z.*
             dist/QwenScribe-Desktop-Windows-x64.sha256.txt
           if-no-files-found: error
@@ -183,6 +173,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            dist/QwenScribe-Desktop-Windows-x64.zip
             dist/QwenScribe-Desktop-Windows-x64.7z.*
             dist/QwenScribe-Desktop-Windows-x64.sha256.txt
