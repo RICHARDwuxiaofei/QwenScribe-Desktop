@@ -42,9 +42,7 @@ jobs:
 
       - name: Run tests
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path build | Out-Null
-          python -m pytest -q --basetemp=build/pytest
+        run: python -m pytest -q --basetemp=.pytest_tmp
 
       - name: Install FFmpeg runtime
         shell: pwsh
