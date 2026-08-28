@@ -1,0 +1,5 @@
+# Install a CUDA-enabled PyTorch build before this file; see README.md.
+# torch is intentionally not pinned here to avoid accidentally selecting a CPU-only wheel.
+PySide6>=6.8,<7
+platformdirs>=4.3,<5
+qwen-asr==0.0.6

@@ -1,0 +1,182 @@
+name: Windows onedir build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12.10"
+  PYTORCH_INDEX_URL: "https://download.pytorch.org/whl/cu128"
+  PYTORCH_VERSION: "2.11.0+cu128"
+  VULKAN_SDK_VERSION: "1.4.350.0"
+  VULKAN_SDK_SHA256: "855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b"
+  PURIPULY_COMMIT: "6f83741c7e68d9d13b2efa306d3427df447d576b"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout application source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "torch==$env:PYTORCH_VERSION" --index-url $env:PYTORCH_INDEX_URL
+          python -m pip install -r requirements-dev.txt
+          python -m pip install "libclang==18.1.1"
+
+      - name: Run tests
+        shell: pwsh
+        run: python -m pytest -q --basetemp=build/pytest
+
+      - name: Install FFmpeg runtime
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+          $ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Copy-Item -LiteralPath $ffmpeg -Destination bin/ffmpeg.exe -Force
+          Copy-Item -LiteralPath $ffprobe -Destination bin/ffprobe.exe -Force
+          & bin/ffmpeg.exe -version
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download pinned Vulkan SDK
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkan-sdk.exe"
+          $sdkRoot = Join-Path $env:RUNNER_TEMP "VulkanSDK-$env:VULKAN_SDK_VERSION"
+          Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true" `
+            -OutFile $installer
+          $actual = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:VULKAN_SDK_SHA256) {
+            throw "Vulkan SDK checksum mismatch: $actual"
+          }
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList @(
+              "--root", $sdkRoot,
+              "--accept-licenses",
+              "--default-answer",
+              "--confirm-command", "install",
+              "copy_only=1"
+            ) `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Vulkan SDK installer failed with exit code $($process.ExitCode)"
+          }
+          "VULKAN_SDK=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$sdkRoot\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Fetch and build pinned Vulkan worker
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:RUNNER_TEMP "PuriPuly-heart"
+          git clone --filter=blob:none --no-checkout `
+            https://github.com/RICHARDwuxiaofei/PuriPuly-heart.git $source
+          git -C $source sparse-checkout init --cone
+          git -C $source sparse-checkout set native/gpu_worker
+          git -C $source checkout $env:PURIPULY_COMMIT
+          $clangPath = python -c "import pathlib, clang; print(pathlib.Path(clang.__file__).parent / 'native')"
+          $env:LIBCLANG_PATH = $clangPath.Trim()
+          $env:CMAKE_PREFIX_PATH = $env:VULKAN_SDK
+          cargo build `
+            --manifest-path "$source/native/gpu_worker/Cargo.toml" `
+            --locked `
+            --release `
+            --bin PuriPulyHeartGpuWorker `
+            --target-dir build/gpu-worker
+          Copy-Item `
+            -LiteralPath build/gpu-worker/release/PuriPulyHeartGpuWorker.exe `
+            -Destination bin/PuriPulyHeartGpuWorker.exe `
+            -Force
+          Copy-Item `
+            -LiteralPath "$source/LICENSE" `
+            -Destination bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt `
+            -Force
+          & bin/PuriPulyHeartGpuWorker.exe --check-startup-contract
+
+      - name: Build PyInstaller onedir application
+        shell: pwsh
+        run: python -m PyInstaller --clean --noconfirm QwenASRDesktop.spec
+
+      - name: Stage documentation and verify model exclusion
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/QwenASRDesktop/README.md
+          Copy-Item 使用说明.md dist/QwenASRDesktop/使用说明.md
+          Copy-Item THIRD_PARTY_NOTICES.md dist/QwenASRDesktop/THIRD_PARTY_NOTICES.md
+          Copy-Item `
+            bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt `
+            dist/QwenASRDesktop/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt
+          $forbidden = Get-ChildItem dist/QwenASRDesktop -Recurse -File | Where-Object {
+            $_.Extension -in @(".gguf", ".safetensors") -or $_.Name -like "*.part"
+          }
+          if ($forbidden) {
+            $forbidden | ForEach-Object { Write-Error "Model leaked into build: $($_.FullName)" }
+            throw "Packaged output contains model weights."
+          }
+          Compress-Archive `
+            -Path dist/QwenASRDesktop `
+            -DestinationPath dist/QwenASRDesktop-Windows-x64.zip `
+            -CompressionLevel Optimal
+          $zip = Get-Item dist/QwenASRDesktop-Windows-x64.zip
+          if ($zip.Length -ge 1900MB) {
+            Remove-Item -LiteralPath $zip.FullName
+            & 7z a -t7z -mx=7 -v1900m `
+              dist/QwenASRDesktop-Windows-x64.7z `
+              dist/QwenASRDesktop
+            if ($LASTEXITCODE -ne 0) { throw "7-Zip split archive failed." }
+          }
+          $assets = Get-ChildItem dist -File | Where-Object {
+            $_.Name -like "QwenASRDesktop-Windows-x64.zip" -or
+            $_.Name -like "QwenASRDesktop-Windows-x64.7z.*"
+          }
+          if (-not $assets) { throw "No release archive was generated." }
+          $hashLines = foreach ($asset in $assets) {
+            $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash *$($asset.Name)"
+          }
+          $hashLines | Set-Content `
+            dist/QwenASRDesktop-Windows-x64.sha256.txt `
+            -Encoding ascii
+
+      - name: Upload review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QwenASRDesktop-Windows-x64
+          path: |
+            dist/QwenASRDesktop-Windows-x64.zip
+            dist/QwenASRDesktop-Windows-x64.7z.*
+            dist/QwenASRDesktop-Windows-x64.sha256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach files to tagged GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/QwenASRDesktop-Windows-x64.zip
+            dist/QwenASRDesktop-Windows-x64.7z.*
+            dist/QwenASRDesktop-Windows-x64.sha256.txt
