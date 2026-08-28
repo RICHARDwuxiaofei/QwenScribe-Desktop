@@ -48,8 +48,14 @@ jobs:
         shell: pwsh
         run: |
           choco install ffmpeg -y --no-progress
-          $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-          $ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
+          $ffmpegTools = Join-Path $env:ChocolateyInstall "lib\ffmpeg\tools"
+          $ffmpeg = Get-ChildItem -LiteralPath $ffmpegTools -Recurse -File -Filter ffmpeg.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          $ffprobe = Get-ChildItem -LiteralPath $ffmpegTools -Recurse -File -Filter ffprobe.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ffmpeg -or -not $ffprobe) {
+            throw "Chocolatey installed ffmpeg, but the real runtime binaries were not found."
+          }
           New-Item -ItemType Directory -Force -Path bin | Out-Null
           Copy-Item -LiteralPath $ffmpeg -Destination bin/ffmpeg.exe -Force
           Copy-Item -LiteralPath $ffprobe -Destination bin/ffprobe.exe -Force
