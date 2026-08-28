@@ -35,6 +35,15 @@ from PySide6.QtWidgets import (
 )
 
 from .config_service import ConfigService
+from .i18n import (
+    STATIC_EN,
+    UI_LANGUAGES,
+    asr_language_text,
+    normalize_ui_language,
+    queue_status_text,
+    runtime_text,
+    static_text,
+)
 from .language_map import LANGUAGE_MAP, language_for_label, valid_label_or_default
 from .model_service import ModelService
 from .model_download_service import (
@@ -219,6 +228,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setAcceptDrops(True)
         self._config = config_service or ConfigService()
+        self._ui_language = normalize_ui_language(self._config.get("ui_language"))
+        self._static_text_widgets: list[tuple[QWidget, str]] = []
+        self._placeholder_widgets: list[tuple[QWidget, str]] = []
         self._queue = TranscriptionQueue()
         self._model_service = model_service
         self._tree_items: list[QTreeWidgetItem] = []
@@ -243,11 +255,12 @@ class MainWindow(QMainWindow):
         self._download_worker: ModelDownloadWorker | None = None
         self._download_dialog: QProgressDialog | None = None
 
-        self.setWindowTitle("QwenASRDesktop")
+        self.setWindowTitle("QwenScribe Desktop")
         self.setMinimumSize(980, 700)
         self.resize(1180, 820)
         self.setStyleSheet(DARK_STYLESHEET)
         self._build_ui()
+        self._capture_static_translations()
         self._restore_settings()
         self._connect_ui()
         self._start_worker_thread(model_service)
@@ -265,7 +278,7 @@ class MainWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(18, 22, 18, 18)
         sidebar_layout.setSpacing(14)
-        app_title = QLabel("Qwen3-ASR")
+        app_title = QLabel("QwenScribe")
         app_title.setObjectName("appTitle")
         app_subtitle = QLabel("Local Desktop")
         app_subtitle.setObjectName("muted")
@@ -275,6 +288,14 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(app_subtitle)
         sidebar_layout.addSpacing(12)
         sidebar_layout.addWidget(local_badge)
+
+        language_row = QHBoxLayout()
+        language_row.addWidget(QLabel("界面语言"))
+        self.ui_language_combo = QComboBox()
+        for label, code in UI_LANGUAGES:
+            self.ui_language_combo.addItem(label, code)
+        language_row.addWidget(self.ui_language_combo, 1)
+        sidebar_layout.addLayout(language_row)
 
         self.gpu_label = QLabel("正在后台检测所选推理设备…")
         self.gpu_label.setObjectName("statusCard")
@@ -296,7 +317,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(QLabel("任务"))
         sidebar_layout.addWidget(self.queue_stats_label)
         sidebar_layout.addStretch(1)
-        privacy = QLabel("模型加载后会驻留在后台线程中，多个文件顺序复用同一模型。")
+        privacy = QLabel("模型在独立后台进程中驻留，多个文件顺序复用同一模型。")
         privacy.setObjectName("muted")
         privacy.setWordWrap(True)
         sidebar_layout.addWidget(privacy)
@@ -329,7 +350,8 @@ class MainWindow(QMainWindow):
         settings_row.addSpacing(12)
         settings_row.addWidget(QLabel("语言"))
         self.language_combo = QComboBox()
-        self.language_combo.addItems(list(LANGUAGE_MAP.keys()))
+        for label in LANGUAGE_MAP:
+            self.language_combo.addItem(label, label)
         self.language_combo.setMinimumWidth(150)
         settings_row.addWidget(self.language_combo)
         layout.addLayout(settings_row)
@@ -452,6 +474,7 @@ class MainWindow(QMainWindow):
         self.select_output_button.clicked.connect(self._choose_output_directory)
         self.output_edit.editingFinished.connect(self._save_output_directory)
         self.language_combo.currentTextChanged.connect(self._save_language)
+        self.ui_language_combo.currentIndexChanged.connect(self._on_ui_language_changed)
         self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
@@ -492,11 +515,13 @@ class MainWindow(QMainWindow):
         self.gpu_probe_requested.emit()
 
     def _restore_settings(self) -> None:
+        ui_index = self.ui_language_combo.findData(self._ui_language)
+        self.ui_language_combo.setCurrentIndex(max(0, ui_index))
         output = self._config.get("output_directory") or str(Path.home() / "Documents")
         self.output_edit.setText(str(output))
-        self.language_combo.setCurrentText(
-            valid_label_or_default(self._config.get("selected_language"))
-        )
+        selected_language = valid_label_or_default(self._config.get("selected_language"))
+        language_index = self.language_combo.findData(selected_language)
+        self.language_combo.setCurrentIndex(max(0, language_index))
         backend_index = self.backend_combo.findData(self._active_backend)
         self.backend_combo.setCurrentIndex(max(0, backend_index))
         model_index = self.model_combo.findData(self._active_backend)
@@ -505,18 +530,90 @@ class MainWindow(QMainWindow):
         geometry = self._config.get("window_geometry")
         if isinstance(geometry, str) and geometry:
             self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
+        self._apply_ui_language()
+
+    def _capture_static_translations(self) -> None:
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, (QLabel, QPushButton)):
+                text = widget.text()
+                if text in STATIC_EN and widget not in (
+                    self.gpu_label,
+                    self.queue_stats_label,
+                    self.status_label,
+                ):
+                    self._static_text_widgets.append((widget, text))
+            if isinstance(widget, (QLineEdit, QPlainTextEdit)):
+                placeholder = widget.placeholderText()
+                if placeholder in STATIC_EN:
+                    self._placeholder_widgets.append((widget, placeholder))
+
+    def _apply_ui_language(self) -> None:
+        for widget, chinese in self._static_text_widgets:
+            widget.setText(static_text(chinese, self._ui_language))  # type: ignore[attr-defined]
+        for widget, chinese in self._placeholder_widgets:
+            widget.setPlaceholderText(static_text(chinese, self._ui_language))  # type: ignore[attr-defined]
+        headers = ["文件", "状态", "大小", "进度"]
+        english_headers = ["File", "Status", "Size", "Progress"]
+        self.queue_tree.setHeaderLabels(
+            english_headers if self._ui_language == "en_US" else headers
+        )
+        self.backend_combo.setItemText(
+            0,
+            self._t(
+                "官方 Transformers（PyTorch CUDA）",
+                "Official Transformers (PyTorch CUDA)",
+            ),
+        )
+        self.backend_combo.setItemText(1, "transcribe.cpp (Vulkan GGUF)")
+        self.model_combo.setItemText(
+            0,
+            self._t(
+                "Qwen3-ASR-1.7B 官方 BF16/FP16",
+                "Qwen3-ASR-1.7B official BF16/FP16",
+            ),
+        )
+        self.model_combo.setItemText(1, "Qwen3-ASR-1.7B Q6_K GGUF")
+        current_language = str(self.language_combo.currentData() or "自动识别")
+        self.language_combo.blockSignals(True)
+        for index in range(self.language_combo.count()):
+            canonical = str(self.language_combo.itemData(index))
+            self.language_combo.setItemText(
+                index, asr_language_text(canonical, self._ui_language)
+            )
+        selected_index = self.language_combo.findData(current_language)
+        self.language_combo.setCurrentIndex(max(0, selected_index))
+        self.language_combo.blockSignals(False)
+        backend = str(self.backend_combo.currentData() or self._active_backend)
+        selected_device = str(self.device_combo.currentData() or self._active_device_id)
+        self._populate_device_combo(backend, selected_device)
+        if not self._task_active and self.progress_bar.value() == 0:
+            self.status_label.setText(self._t("就绪", "Ready"))
+        self._rebuild_queue()
+
+    def _on_ui_language_changed(self, _index: int) -> None:
+        self._ui_language = normalize_ui_language(self.ui_language_combo.currentData())
+        self._config.set("ui_language", self._ui_language)
+        self._apply_ui_language()
+
+    def _t(self, chinese: str, english: str) -> str:
+        return english if self._ui_language == "en_US" else chinese
 
     def _choose_files(self) -> None:
         initial = self._config.get("last_input_directory", str(Path.home()))
         selected, _ = QFileDialog.getOpenFileNames(
-            self, "选择视频或音频", str(initial), FILE_FILTER
+            self,
+            self._t("选择视频或音频", "Choose video or audio"),
+            str(initial),
+            FILE_FILTER if self._ui_language == "zh_CN" else "Media files (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.mp3 *.wav *.flac *.m4a *.aac *.ogg);;All files (*.*)",
         )
         if selected:
             self._add_input_paths([Path(path) for path in selected])
 
     def _choose_folder(self) -> None:
         initial = self._config.get("last_input_directory", str(Path.home()))
-        selected = QFileDialog.getExistingDirectory(self, "选择媒体文件夹", str(initial))
+        selected = QFileDialog.getExistingDirectory(
+            self, self._t("选择媒体文件夹", "Choose media folder"), str(initial)
+        )
         if selected:
             self._add_input_paths([Path(selected)])
 
@@ -586,7 +683,9 @@ class MainWindow(QMainWindow):
             return
         entry = self._queue.entries[index]
         item = self._tree_items[index]
-        item.setText(1, STATUS_TEXT[entry.status])
+        item.setText(
+            1, queue_status_text(STATUS_TEXT[entry.status], self._ui_language)
+        )
         item.setText(2, format_file_size(entry.size_bytes))
         item.setText(3, f"{entry.progress}%")
         item.setForeground(1, QBrush(STATUS_COLORS[entry.status]))
@@ -596,10 +695,13 @@ class MainWindow(QMainWindow):
     def _update_queue_stats(self) -> None:
         total, completed, failed, cancelled = self._queue.summary()
         if total == 0:
-            self.queue_stats_label.setText("队列为空")
+            self.queue_stats_label.setText(self._t("队列为空", "Queue is empty"))
         else:
             self.queue_stats_label.setText(
-                f"文件：{total}\n完成：{completed}\n错误：{failed}\n取消：{cancelled}"
+                self._t(
+                    f"文件：{total}\n完成：{completed}\n错误：{failed}\n取消：{cancelled}",
+                    f"Files: {total}\nCompleted: {completed}\nErrors: {failed}\nCancelled: {cancelled}",
+                )
             )
 
     def _on_queue_selection_changed(
@@ -635,7 +737,9 @@ class MainWindow(QMainWindow):
 
     def _choose_output_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
-            self, "选择输出目录", self.output_edit.text().strip() or str(Path.home())
+            self,
+            self._t("选择输出目录", "Choose output folder"),
+            self.output_edit.text().strip() or str(Path.home()),
         )
         if selected:
             self.output_edit.setText(selected)
@@ -648,23 +752,34 @@ class MainWindow(QMainWindow):
         self._refresh_start_button()
 
     def _save_language(self, label: str) -> None:
-        self._config.set("selected_language", label)
+        del label
+        self._config.set(
+            "selected_language", str(self.language_combo.currentData() or "自动识别")
+        )
 
     def _populate_device_combo(self, backend: str, selected_device: str = "") -> None:
         devices = self._vulkan_devices if backend == "vulkan" else self._cuda_devices
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
         if backend == "vulkan":
-            self.device_combo.addItem("Vulkan：自动选择", "auto")
+            self.device_combo.addItem(
+                self._t("Vulkan：自动选择", "Vulkan: Auto select"), "auto"
+            )
         for device_id, label in devices:
             self.device_combo.addItem(label, device_id)
         if selected_device and self.device_combo.findData(selected_device) < 0:
-            prefix = "已配置但当前不可用" if self._device_discovery_complete else "正在检测"
+            prefix = (
+                self._t("已配置但当前不可用", "Configured but unavailable")
+                if self._device_discovery_complete
+                else self._t("正在检测", "Detecting")
+            )
             self.device_combo.addItem(
                 f"{prefix}：{selected_device}", selected_device
             )
         if not devices and not selected_device:
-            self.device_combo.addItem("未发现可用设备", "")
+            self.device_combo.addItem(
+                self._t("未发现可用设备", "No available device found"), ""
+            )
         index = self.device_combo.findData(selected_device)
         self.device_combo.setCurrentIndex(max(0, index))
         self.device_combo.blockSignals(False)
@@ -706,8 +821,18 @@ class MainWindow(QMainWindow):
             selected_backend != self._active_backend
             or selected_device != self._active_device_id
         ):
-            self.status_label.setText("推理方式或 GPU 已更改，请重启程序后生效")
-            self._append_log("推理方式或 GPU 已保存；关闭并重新运行 run.bat 后生效。")
+            self.status_label.setText(
+                self._t(
+                    "推理方式或 GPU 已更改，请重启程序后生效",
+                    "Backend or GPU changed; restart the app to apply it",
+                )
+            )
+            self._append_log(
+                self._t(
+                    "推理方式或 GPU 已保存；关闭并重新运行 run.bat 后生效。",
+                    "Backend or GPU saved; close and run run.bat again to apply it.",
+                )
+            )
         self._refresh_start_button()
 
     def _start_batch(self) -> None:
@@ -718,18 +843,28 @@ class MainWindow(QMainWindow):
             return
         output_text = self.output_edit.text().strip()
         if not output_text:
-            QMessageBox.warning(self, "输出目录无效", "请先选择输出目录。")
+            QMessageBox.warning(
+                self,
+                self._t("输出目录无效", "Invalid output folder"),
+                self._t("请先选择输出目录。", "Choose an output folder first."),
+            )
             return
         output_directory = Path(output_text)
         try:
             output_directory.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            QMessageBox.critical(self, "无法创建输出目录", str(error))
+            QMessageBox.critical(
+                self,
+                self._t("无法创建输出目录", "Cannot create output folder"),
+                str(error),
+            )
             return
         self._config.update(
             {
                 "output_directory": str(output_directory),
-                "selected_language": self.language_combo.currentText(),
+                "selected_language": str(
+                    self.language_combo.currentData() or "自动识别"
+                ),
             }
         )
         self._queue.reset_all()
@@ -756,18 +891,33 @@ class MainWindow(QMainWindow):
         else:
             model_text = "Qwen3-ASR-1.7B Transformers（约 4.7 GB）"
         message = QMessageBox(self)
-        message.setWindowTitle("需要下载模型")
+        message.setWindowTitle(self._t("需要下载模型", "Model download required"))
         message.setIcon(QMessageBox.Icon.Information)
-        message.setText(f"本机尚未安装 {model_text}。")
+        message.setText(
+            self._t(
+                f"本机尚未安装 {model_text}。",
+                f"{model_text} is not installed on this computer.",
+            )
+        )
         message.setInformativeText(
-            "请选择下载线路。中国境内建议使用国内线路；使用 VPN 时国际线路可能更慢。\n\n"
-            "模型只保存在当前用户的数据目录，不会放进软件安装包。"
+            self._t(
+                "请选择下载线路。中国境内建议使用国内线路；使用 VPN 时国际线路可能更慢。\n\n"
+                "模型只保存在当前用户的数据目录，不会放进软件安装包。",
+                "Choose a download route. Use the China route in mainland China; with a VPN, the international route may be slower.\n\n"
+                "The model is stored only in the current user's data folder and is not bundled with the application.",
+            )
         )
-        china_button = message.addButton("中国境内（推荐）", QMessageBox.ButtonRole.AcceptRole)
+        china_button = message.addButton(
+            self._t("中国境内（推荐）", "Mainland China (recommended)"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
         international_button = message.addButton(
-            "国际 / Hugging Face", QMessageBox.ButtonRole.ActionRole
+            self._t("国际 / Hugging Face", "International / Hugging Face"),
+            QMessageBox.ButtonRole.ActionRole,
         )
-        message.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        message.addButton(
+            self._t("取消", "Cancel"), QMessageBox.ButtonRole.RejectRole
+        )
         message.exec()
         clicked = message.clickedButton()
         if clicked is china_button:
@@ -779,8 +929,16 @@ class MainWindow(QMainWindow):
         self._download_active = True
         self._set_controls_for_task(True)
         self.cancel_button.setEnabled(False)
-        dialog = QProgressDialog("正在准备模型下载…", "取消下载", 0, 100, self)
-        dialog.setWindowTitle("下载 Qwen3-ASR 模型")
+        dialog = QProgressDialog(
+            self._t("正在准备模型下载…", "Preparing model download…"),
+            self._t("取消下载", "Cancel download"),
+            0,
+            100,
+            self,
+        )
+        dialog.setWindowTitle(
+            self._t("下载 Qwen3-ASR 模型", "Download Qwen3-ASR model")
+        )
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
@@ -802,9 +960,16 @@ class MainWindow(QMainWindow):
         self._download_dialog = dialog
         self._download_worker = worker
         self._download_thread = thread
-        source = "国内线路" if region == "china" else "国际线路"
-        self.status_label.setText(f"正在通过{source}下载模型")
-        self._append_log(f"开始通过{source}下载模型；中断后可重新点击继续。")
+        source = self._t("国内线路", "China route") if region == "china" else self._t("国际线路", "international route")
+        self.status_label.setText(
+            self._t(f"正在通过{source}下载模型", f"Downloading model via {source}")
+        )
+        self._append_log(
+            self._t(
+                f"开始通过{source}下载模型；中断后可重新点击继续。",
+                f"Started model download via {source}; restart it to resume after an interruption.",
+            )
+        )
         dialog.show()
         thread.start()
 
@@ -815,7 +980,8 @@ class MainWindow(QMainWindow):
         percent = max(0, min(100, int(current * 100 / total))) if total else 0
         dialog.setValue(percent)
         dialog.setLabelText(
-            f"正在下载 {name}\n{current / 1024**3:.2f} / {total / 1024**3:.2f} GB"
+            self._t("正在下载", "Downloading")
+            + f" {name}\n{current / 1024**3:.2f} / {total / 1024**3:.2f} GB"
         )
 
     def _finish_model_download_ui(self) -> None:
@@ -831,24 +997,34 @@ class MainWindow(QMainWindow):
 
     def _on_model_download_completed(self, path: str) -> None:
         self._finish_model_download_ui()
-        self.status_label.setText("模型下载完成")
-        self._append_log(f"模型下载并校验完成：{path}")
+        self.status_label.setText(self._t("模型下载完成", "Model download completed"))
+        self._append_log(
+            self._t(f"模型下载并校验完成：{path}", f"Model downloaded and verified: {path}")
+        )
         QTimer.singleShot(0, self._start_batch)
 
     def _on_model_download_failed(self, summary: str) -> None:
         self._finish_model_download_ui()
-        self.status_label.setText("模型下载失败")
+        self.status_label.setText(self._t("模型下载失败", "Model download failed"))
         self._append_log(summary)
         QMessageBox.critical(
             self,
-            "模型下载失败",
-            f"{summary}\n\n正常中断留下的 .part 文件会保留，下次可以继续下载。",
+            self._t("模型下载失败", "Model download failed"),
+            self._t(
+                f"{summary}\n\n正常中断留下的 .part 文件会保留，下次可以继续下载。",
+                f"{summary}\n\nA .part file from a normal interruption is retained and can be resumed next time.",
+            ),
         )
 
     def _on_model_download_cancelled(self) -> None:
         self._finish_model_download_ui()
-        self.status_label.setText("模型下载已取消")
-        self._append_log("模型下载已取消；已下载部分会保留供下次续传。")
+        self.status_label.setText(self._t("模型下载已取消", "Model download cancelled"))
+        self._append_log(
+            self._t(
+                "模型下载已取消；已下载部分会保留供下次续传。",
+                "Model download cancelled; downloaded data is retained for resuming.",
+            )
+        )
 
     def _start_next_task(self) -> None:
         if self._stop_batch:
@@ -873,12 +1049,17 @@ class MainWindow(QMainWindow):
         self._update_entry_row(index)
         self.queue_tree.setCurrentItem(self._tree_items[index])
         self.status_label.setText(
-            f"文件 {self._batch_position + 1}/{len(self._batch_indices)}：正在准备"
+            self._t(
+                f"文件 {self._batch_position + 1}/{len(self._batch_indices)}：正在准备",
+                f"File {self._batch_position + 1}/{len(self._batch_indices)}: preparing",
+            )
         )
         task = TranscriptionTask(
             input_path=entry.path,
             output_directory=Path(self.output_edit.text().strip()),
-            language=language_for_label(self.language_combo.currentText()),
+            language=language_for_label(
+                str(self.language_combo.currentData() or "自动识别")
+            ),
         )
         self._worker.mark_task_pending()
         self.start_requested.emit(task)
@@ -888,15 +1069,28 @@ class MainWindow(QMainWindow):
             return
         self._stop_batch = True
         self.cancel_button.setEnabled(False)
-        self.status_label.setText("正在取消当前文件并停止队列…")
-        self._append_log("已请求取消；模型推理会在当前片段完成后停止。")
+        self.status_label.setText(
+            self._t(
+                "正在取消当前文件并停止队列…",
+                "Cancelling the current file and stopping the queue…",
+            )
+        )
+        self._append_log(
+            self._t(
+                "已请求取消；模型推理会在当前片段完成后停止。",
+                "Cancellation requested; inference will stop after the current segment.",
+            )
+        )
         self._worker.request_cancel()
 
     def _on_worker_status(self, status: str) -> None:
         prefix = ""
         if self._batch_indices and self._batch_position >= 0:
-            prefix = f"文件 {self._batch_position + 1}/{len(self._batch_indices)} · "
-        self.status_label.setText(prefix + status)
+            prefix = self._t(
+                f"文件 {self._batch_position + 1}/{len(self._batch_indices)} · ",
+                f"File {self._batch_position + 1}/{len(self._batch_indices)} · ",
+            )
+        self.status_label.setText(prefix + runtime_text(status, self._ui_language))
 
     def _on_worker_progress(self, progress: int) -> None:
         self.progress_bar.setValue(progress)
@@ -942,10 +1136,15 @@ class MainWindow(QMainWindow):
         if self._closing_after_cancel:
             QTimer.singleShot(0, self.close)
             return
-        message = "队列已停止。"
+        message = self._t("队列已停止。", "The queue has stopped.")
         if partial_path:
-            message += f"\n当前文件的已识别内容保存在：\n{partial_path}"
-        QMessageBox.information(self, "已取消", message)
+            message += self._t(
+                f"\n当前文件的已识别内容保存在：\n{partial_path}",
+                f"\nRecognized text for the current file was saved to:\n{partial_path}",
+            )
+        QMessageBox.information(
+            self, self._t("已取消", "Cancelled"), message
+        )
 
     def _on_task_failed(self, summary: str, partial_path: str) -> None:
         if self._current_index is not None:
@@ -981,8 +1180,15 @@ class MainWindow(QMainWindow):
             self._task_active = False
             self._stop_batch = True
             self._set_controls_for_task(False)
-            self.status_label.setText("队列因环境或模型错误停止")
-            QMessageBox.critical(self, "队列已停止", summary)
+            self.status_label.setText(
+                self._t(
+                    "队列因环境或模型错误停止",
+                    "Queue stopped because of an environment or model error",
+                )
+            )
+            QMessageBox.critical(
+                self, self._t("队列已停止", "Queue stopped"), summary
+            )
         else:
             QTimer.singleShot(0, self._start_next_task)
 
@@ -995,14 +1201,19 @@ class MainWindow(QMainWindow):
         self._update_queue_stats()
         total, completed, failed, cancelled_count = self._queue.summary()
         if cancelled:
-            self.status_label.setText("队列已停止")
+            self.status_label.setText(self._t("队列已停止", "Queue stopped"))
         else:
             self.progress_bar.setValue(100)
-            self.status_label.setText("队列处理完成")
+            self.status_label.setText(
+                self._t("队列处理完成", "Queue completed")
+            )
             QMessageBox.information(
                 self,
-                "队列完成",
-                f"共 {total} 个文件\n成功：{completed}\n失败：{failed}\n取消：{cancelled_count}",
+                self._t("队列完成", "Queue completed"),
+                self._t(
+                    f"共 {total} 个文件\n成功：{completed}\n失败：{failed}\n取消：{cancelled_count}",
+                    f"Files: {total}\nSucceeded: {completed}\nFailed: {failed}\nCancelled: {cancelled_count}",
+                ),
             )
 
     def _set_controls_for_task(self, active: bool) -> None:
@@ -1040,7 +1251,12 @@ class MainWindow(QMainWindow):
         self.gpu_label.setText(description)
         self.gpu_label.setStyleSheet("color: #4ade80;" if available else "color: #f87171;")
         if not available:
-            self.status_label.setText("所选推理设备不可用")
+            self.status_label.setText(
+                self._t(
+                    "所选推理设备不可用",
+                    "The selected inference device is unavailable",
+                )
+            )
             self._append_log(description)
         self._refresh_start_button()
 
@@ -1076,11 +1292,17 @@ class MainWindow(QMainWindow):
             super().dropEvent(event)
 
     def _show_detected_language(self, language: str) -> None:
-        if self.language_combo.currentText() == "自动识别":
-            self.statusBar().showMessage(f"当前片段检测语言：{language}", 7000)
+        if self.language_combo.currentData() == "自动识别":
+            self.statusBar().showMessage(
+                self._t(
+                    f"当前片段检测语言：{language}",
+                    f"Detected language for current segment: {language}",
+                ),
+                7000,
+            )
 
     def _append_log(self, message: str) -> None:
-        self.log_view.appendPlainText(message)
+        self.log_view.appendPlainText(runtime_text(message, self._ui_language))
 
     def _refresh_open_output_button(self) -> None:
         selected = self.queue_tree.currentItem()
@@ -1112,21 +1334,29 @@ class MainWindow(QMainWindow):
         if self._download_active:
             answer = QMessageBox.question(
                 self,
-                "模型正在下载",
-                "是否取消下载？已下载部分会保留供下次续传。",
+                self._t("模型正在下载", "Model download in progress"),
+                self._t(
+                    "是否取消下载？已下载部分会保留供下次续传。",
+                    "Cancel the download? Downloaded data will be retained for resuming.",
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes and self._download_worker is not None:
                 self._download_worker.request_cancel()
-                self.status_label.setText("正在取消模型下载…")
+                self.status_label.setText(
+                    self._t("正在取消模型下载…", "Cancelling model download…")
+                )
             event.ignore()
             return
         if self._task_active:
             answer = QMessageBox.question(
                 self,
-                "任务正在运行",
-                "是否取消当前文件、停止队列并退出？\n已经完成的文件和 partial 文本会保留。",
+                self._t("任务正在运行", "Task in progress"),
+                self._t(
+                    "是否取消当前文件、停止队列并退出？\n已经完成的文件和 partial 文本会保留。",
+                    "Cancel the current file, stop the queue, and exit?\nCompleted files and partial text will be retained.",
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -1143,7 +1373,10 @@ class MainWindow(QMainWindow):
             {
                 "window_geometry": geometry,
                 "output_directory": self.output_edit.text().strip(),
-                "selected_language": self.language_combo.currentText(),
+                "selected_language": str(
+                    self.language_combo.currentData() or "自动识别"
+                ),
+                "ui_language": self._ui_language,
             }
         )
         QMetaObject.invokeMethod(
@@ -1155,6 +1388,13 @@ class MainWindow(QMainWindow):
         if not self._worker_thread.wait(5000):
             LOGGER.error("后台线程未能在 5 秒内退出")
             event.ignore()
-            QMessageBox.warning(self, "暂时无法退出", "后台线程仍在收尾，请稍后再次关闭。")
+            QMessageBox.warning(
+                self,
+                self._t("暂时无法退出", "Cannot exit yet"),
+                self._t(
+                    "后台线程仍在收尾，请稍后再次关闭。",
+                    "The background thread is still finishing; try closing again shortly.",
+                ),
+            )
             return
         event.accept()

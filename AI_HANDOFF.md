@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-QwenASRDesktop 是面向 Windows 11 的完全本地视频/音频转文字桌面应用。用户拖入或选择媒体，程序提取音频、按静音分段，并通过本地 Qwen3-ASR-1.7B 顺序识别，最终只生成 UTF-8 TXT。目标用户是希望文件不上传云端，并使用 NVIDIA CUDA 或 Vulkan GPU 本地推理的人。
+QwenScribe Desktop（内部项目名 QwenASRDesktop）是面向 Windows 11 的完全本地视频/音频转文字桌面应用。用户拖入或选择媒体，程序提取音频、按静音分段，并通过本地 Qwen3-ASR-1.7B 顺序识别，最终只生成 UTF-8 TXT。目标用户是希望文件不上传云端，并使用 NVIDIA CUDA 或 Vulkan GPU 本地推理的人。
 
 当前处于“源代码预发布检查点”阶段：核心 GUI、媒体处理、双推理后端、模型下载、partial 恢复、测试和 GitHub Actions onedir 构建流程均已实现；RTX 4070 SUPER 上的 Transformers 真机短音频闭环已通过，但长达两小时的完整任务和最新代码的云端打包产物仍需发布前验收。
 
@@ -11,6 +11,7 @@ QwenASRDesktop 是面向 Windows 11 的完全本地视频/音频转文字桌面�
 ### 已完成
 
 - PySide6 单窗口 GUI、文件/文件夹选择、整窗拖放、顺序任务队列、输出目录和语言选择。
+- `src/i18n.py` 驱动的简体中文 / English 运行时界面切换；界面语言与 ASR 音频语言相互独立。
 - 动态枚举 CUDA/Vulkan 设备并持久化明确设备 ID，不按显卡名称猜测或静默切换设备。
 - FFprobe 校验、FFmpeg 第一音轨提取、静音检测、纯函数分段、按片段顺序识别。
 - 每段立即追加并 `flush`/尽力 `fsync` 到 `.partial.txt`；成功后安全改名，取消/异常保留部分结果。
@@ -98,6 +99,10 @@ Output -> UTF-8 TXT and crash-safe partial TXT
 
 - 用户 JSON 配置与轮转日志位置。
 
+`src/i18n.py`
+
+- 无外部依赖的界面翻译资源、ASR 语言显示名和常见运行状态翻译。增加界面语言时优先扩展这里。
+
 `QwenASRDesktop.spec` / `.github/workflows/windows-build.yml`
 
 - PyInstaller onedir 内容和 GitHub Windows 云构建/Release 流程；模型权重不得进入产物。
@@ -146,7 +151,7 @@ GUI 选择 Transformers 或 Vulkan、模型和明确设备 ID
 
 ## 7. Configuration / Environment
 
-Windows 用户配置：`%LOCALAPPDATA%\QwenASRDesktop\config.json`。键包括 `last_input_directory`、`output_directory`、`selected_language`、`window_geometry`、`inference_backend`、`cuda_device_id`、`vulkan_device_id`。
+Windows 用户配置：`%LOCALAPPDATA%\QwenASRDesktop\config.json`。键包括 `last_input_directory`、`output_directory`、`selected_language`、`ui_language`、`window_geometry`、`inference_backend`、`cuda_device_id`、`vulkan_device_id`。
 
 日志：`%LOCALAPPDATA%\QwenASRDesktop\Logs\QwenASRDesktop.log` 及 native crash log。用户配置、日志、partial、模型和下载缓存均不得提交。
 
@@ -227,9 +232,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 ## 13. Last Handoff State
 
 - 日期：2026-08-29
-- branch：`main`（本次将创建首个本地检查点）
-- commit hash：首次提交前尚不存在；提交后以 `git rev-parse HEAD` 为准
-- 阶段：源代码预发布检查点，等待首次 GitHub 云构建审核
-- 未提交修改：本文件生成时项目尚未初始化 Git；本次计划将审计后的源码作为首个提交
-- 最后验证：`compileall` 通过；pytest 25 项通过；RTX 4070 SUPER 实际加载本地 Qwen3-ASR-1.7B 成功（16.33 秒）；从真实 MP4 截取 8 秒音频完成转写（加载加识别 23.50 秒，58 字符，Chinese）
+- branch：`main`
+- 基础检查点 commit：`9ee4094c979c7e9f48c8c7d76e7260564423d154`；当前 HEAD 请运行 `git rev-parse HEAD`
+- 阶段：QwenScribe Desktop v1.0.0 发布候选，等待首次 GitHub 云构建审核
+- 未提交修改：发布提交前以 `git status` 为准
+- 最后验证：`compileall` 通过；pytest 29 项通过（含 i18n GUI 切换）；RTX 4070 SUPER 实际加载本地 Qwen3-ASR-1.7B 成功（16.33 秒）；从真实 MP4 截取 8 秒音频完成转写（加载加识别 23.50 秒，58 字符，Chinese）
 - 未执行：最新 GUI 完整长任务、最新 PyInstaller onedir 构建、GitHub Actions、干净机器安装验收

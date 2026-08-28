@@ -1,10 +1,41 @@
-# QwenASRDesktop
+# QwenScribe Desktop
 
-QwenASRDesktop 是面向 Windows 11 的完全本地视频/音频转文字桌面应用。它支持两套可切换后端：官方 `qwen-asr` Transformers + PyTorch CUDA，以及 Qwen3-ASR-1.7B Q6_K GGUF + transcribe.cpp Vulkan。Vulkan 后端可以严格选择 Intel 核显或 NVIDIA 独显。输入文件不会上传，最终只生成 UTF-8 TXT。
+[中文](#中文简介) · [English](#english-overview)
+
+## 中文简介
+
+QwenScribe Desktop（内部项目名 QwenASRDesktop）是面向 Windows 11 的完全本地视频/音频转文字桌面应用。它支持两套可切换后端：官方 `qwen-asr` Transformers + PyTorch CUDA，以及 Qwen3-ASR-1.7B Q6_K GGUF + transcribe.cpp Vulkan。Vulkan 后端可以严格选择 Intel 核显或 NVIDIA 独显。输入文件不会上传，最终只生成 UTF-8 TXT。界面可在简体中文和 English 之间即时切换。
+
+## English Overview
+
+QwenScribe Desktop is a fully local video and audio transcription app for Windows 11. It supports two selectable inference backends: the official `qwen-asr` Transformers backend with PyTorch CUDA, and a Qwen3-ASR-1.7B Q6_K GGUF backend powered by transcribe.cpp/Vulkan. The Vulkan route can target an explicitly selected integrated or discrete GPU. Media never leaves the computer, and the only final output is a clean UTF-8 TXT file without timestamps.
+
+Highlights:
+
+- Drag and drop one or more videos/audio files, or recursively add a folder.
+- Dynamically detects available CUDA and Vulkan devices; it never hard-codes or silently changes the selected GPU.
+- Splits long recordings around silence and processes one segment at a time, so multi-hour media is not loaded into GPU memory at once.
+- Writes every completed segment to a crash-resistant `.partial.txt` before producing the final TXT.
+- Keeps the Transformers/CUDA model in an isolated persistent process so a native GPU runtime crash cannot directly terminate the GUI.
+- Downloads models only when needed, with separate mainland-China and international routes; downloaded models can be used offline.
+- Runtime interface switching between Simplified Chinese and English. The interface language is independent from the audio recognition language.
+
+Quick start on Windows 11 with 64-bit Python 3.12:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install_windows.ps1
+.\run.bat
+```
+
+Requirements: a CUDA-capable NVIDIA GPU for the official Transformers backend, or a supported Vulkan GPU and the packaged worker for the GGUF backend; FFmpeg and FFprobe are also required. Release packages include FFmpeg/FFprobe and the Vulkan worker, but never include model weights. On first transcription, choose the China or international download route in the app. See the Chinese sections below for detailed installation, model paths, troubleshooting, testing, and release instructions.
+
+## 中文详细文档
 
 ## 功能与边界
 
 - 深色队列式界面，支持拖放、一次选择多个文件、递归添加文件夹、逐文件状态和结果预览。
+- i18n 界面支持简体中文 / English 即时切换，并自动记住选择；界面语言不改变音频识别语言。
 - 支持 `mp4/mkv/mov/avi/webm/m4v/mp3/wav/flac/m4a/aac/ogg`；队列在单张 GPU 上顺序处理，不并发加载多个长片段。
 - FFprobe 验证音轨和时长；FFmpeg 提取第一条音轨为临时的 16 kHz 单声道 PCM WAV。逐段送入模型前再生成小型 FLAC，避免部分长 AAC 转码后出现 FLAC 随机切片错误。
 - 依据静音点规划约 180 秒的分段，每次只创建并识别一个片段。两小时媒体不会整体载入内存或显存。
@@ -228,7 +259,7 @@ GitHub 云编译不是技术上的强制要求，但对于你的发布流程更�
 .\.venv\Scripts\pyinstaller.exe --clean .\QwenASRDesktop.spec
 ```
 
-输出位于 `dist\QwenASRDesktop\`。这是 onedir，不是 onefile；PyTorch 依赖很大，onedir 启动和排错更合适。两套模型权重都不会打入 EXE。spec 会携带 FFmpeg、FFprobe 和 Vulkan worker；用户首次转写时由应用下载所选模型。
+输出位于 `dist\QwenScribeDesktop\`。这是 onedir，不是 onefile；PyTorch 依赖很大，onedir 启动和排错更合适。两套模型权重都不会打入 EXE。spec 会携带 FFmpeg、FFprobe 和 Vulkan worker；用户首次转写时由应用下载所选模型。
 
 ## 代码结构
 
