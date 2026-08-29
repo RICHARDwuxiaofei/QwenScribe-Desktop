@@ -239,14 +239,25 @@ Intel 核显不能运行 PyTorch CUDA 模型。要使用核显，请选择 `tran
 
 测试覆盖静音分段、两小时边界规划、短尾合并、递增输出文件名、Unicode 文件名、语言映射，以及通过依赖注入验证模型参数和结果读取。
 
+## Windows 发布 SKU 与体积
+
+发布构建不再默认携带两套推理后端：
+
+- `QwenScribe-Vulkan-Windows-x64`：默认发行版，包含 Vulkan/GGUF worker、FFmpeg/FFprobe 和 Qt/Python 运行时；不含 PyTorch、CUDA、Transformers、`qwen-asr` 或任何模型。
+- `QwenScribe-CUDA-Windows-x64`：仅供需要官方 `qwen-asr` Transformers 路线的 NVIDIA 用户；保留独立 Transformers 子进程和显式 CUDA 设备 ID，但不含 Vulkan worker。
+
+两种 SKU 都不含模型；首次下载后模型保存在用户数据目录，可离线使用。若旧配置选择了当前 SKU 没有的后端，程序会明确提示“当前发行版本不包含该后端”，不会静默改用另一块 GPU。
+
+Vulkan 版本本地测得解压后约 653.81 MiB，常规 ZIP 压缩约 253.97 MiB（FFmpeg/FFprobe 仍内置，约 423.71 MiB 解压后）。因此当前阶段优先保留自包含媒体运行时；首次真正可用下载量仍应加上外置 Q6_K 模型约 1.69 GB。每次 CI 会生成 JSON/Markdown size report 与 artifact manifest；不要把源仓库大小、压缩 Artifact、解压目录和模型下载量混为一谈。
+
 ## GitHub Actions 云编译与发布
 
 仓库提供 `.github/workflows/windows-build.yml`：
 
-- 手动运行 `workflow_dispatch`：在 GitHub 的 Windows runner 上测试并生成 14 天有效的审核 Artifact，不创建 Release。
-- 推送 `v*` 标签：执行同一套构建，并把压缩包与 SHA-256 附加到 GitHub Release。若 CUDA 运行时导致单包接近 GitHub 的 2 GiB 单文件限制，会自动生成 7-Zip 分卷。
-- 云端会安装 CUDA PyTorch、下载 FFmpeg、从固定提交构建 Vulkan worker，再执行 PyInstaller `onedir`。
-- 工作流会扫描产物；发现 `.gguf`、`.safetensors` 或 `.part` 就直接失败。
+- 普通分支 push 或手动运行 `workflow_dispatch`：分别构建并上传两种 14 天有效的审核 Artifact，不创建 Release。
+- 推送未来的 `v*` 标签：分别附加两个 SKU；本轮不会创建 tag 或 Release。只有 CUDA archive 实际超过 1800 MiB 时才分卷。
+- Vulkan job 只安装 `requirements-common.txt` + `requirements-vulkan.txt`，构建固定提交的 worker；CUDA job 才安装固定 CUDA PyTorch 和 `requirements-cuda.txt`。
+- 工作流会从全新目录运行包内 `--check`、FFmpeg/FFprobe、短 WAV 提取和 `silencedetect`，扫描模型/缓存/媒体/日志，并对 Vulkan 包拒绝 PyTorch/CUDA/Transformers 内容、对 CUDA 包拒绝 Vulkan worker。
 
 GitHub 云编译不是技术上的强制要求，但对于你的发布流程更合适：本地不需要编译，构建步骤可复现，而且用户下载的是统一 ZIP。详细步骤见 `发布与云编译.md`。
 
@@ -259,7 +270,7 @@ GitHub 云编译不是技术上的强制要求，但对于你的发布流程更�
 .\.venv\Scripts\pyinstaller.exe --clean .\QwenASRDesktop.spec
 ```
 
-输出位于 `dist\QwenScribeDesktop\`。这是 onedir，不是 onefile；PyTorch 依赖很大，onedir 启动和排错更合适。两套模型权重都不会打入 EXE。spec 会携带 FFmpeg、FFprobe 和 Vulkan worker；用户首次转写时由应用下载所选模型。
+设置 `QWENSCRIBE_BUILD_VARIANT=vulkan` 或 `cuda` 后运行 PyInstaller；输出分别位于 `dist\QwenScribe-Vulkan-Windows-x64\` 与 `dist\QwenScribe-CUDA-Windows-x64\`。这是 onedir，不是 onefile；两套模型权重都不会打入 EXE。Vulkan SKU 携带 worker，CUDA SKU 保留 Transformers 子进程。
 
 ## 代码结构
 

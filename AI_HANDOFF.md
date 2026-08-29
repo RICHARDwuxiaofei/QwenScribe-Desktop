@@ -244,3 +244,66 @@ Set-ExecutionPolicy -Scope Process Bypass
 - 未提交修改：提交本次 handoff 后应为干净工作树；新 AI 必须先运行 `git status` 和 `git log -10 --oneline`
 - 最后验证：本地 pytest 29 项通过（使用系统 Python 3.12 加载现有 `.venv` site-packages，因为 `.venv` 启动器记录的旧 Python 路径失效）；云端 pytest 29 项通过；云端 FFmpeg/Vulkan/PyInstaller/模型排除/Artifact 上传通过；RTX 4070 SUPER 实际加载本地 Qwen3-ASR-1.7B 成功（16.33 秒）；真实 MP4 的 8 秒音频完成转写（加载加识别 23.50 秒，58 字符，Chinese）
 - 未执行：下载并解包本次 Artifact、打包 EXE 真机启动、最新 GUI 完整长任务、干净机器安装验收、`v1.0.0` tag 和 GitHub Release
+
+## 14. Release packaging size decision handoff (2026-08-29)
+
+> 本节是当前发布体积讨论的最新交接，优先于第 11 节中“验收后立即打 tag”的旧计划。体积架构没有得到用户确认前，不得创建 tag、Release 或新代码提交。
+
+### 当前事实
+
+- 用户指定的发布验收代码基线是 `c1aca48`。本轮只允许更新文档；不得 reset、rebase、force push、修改源码/工作流、创建 commit 或创建 `v1.0.0` tag。
+- 记录时本地分支为 `main`，HEAD 为 `9e1734f`（`c1aca48` 的后续提交），工作树原本干净；本次文档改动会使工作树出现有意的文档差异，代码和 workflow 内容不应改变。
+- GitHub 源码仓库 `RICHARDwuxiaofei/QwenScribe-Desktop` 的 API `size` 约为 90 KB；当前 Git 跟踪文件实际合计约 226,742 bytes。仓库小是正常的：`.venv`、模型、下载缓存和 EXE 均被 `.gitignore` 排除，没有把模型提交到 Git。
+- 本机开发目录约 10.34 GiB，主要是 `.venv` 约 5.71 GiB、CUDA PyTorch site-packages 约 4.11 GiB、`downloads` 中的 PyTorch wheel 约 2.56 GiB、`models` 中的 Q6_K GGUF 约 1.58 GiB，以及 `bin` 中约 424 MiB 的 FFmpeg/FFprobe 和约 74 MiB 的 Vulkan worker。这些是开发环境/外置模型，不等于 GitHub 仓库大小。
+- Actions run `33216786493` 成功，Artifact ID `9704253084`，名称 `QwenScribe-Desktop-Windows-x64`。GitHub 记录的外层归档大小为 `2,254,013,387` bytes（约 2.10 GiB），digest 为 `7d15a932ce2ae5d7ba6f790f58c7968efefd8d39994b2b72776bdcbb9e184391`。当前尚未完成本地完整下载、SHA-256、解包或 EXE 真机验收；不要把这次云构建成功当作发布验收通过。
+- 之前的下载因 Azure/GitHub 签名链路过慢/过期中断，留下的临时部分文件（若仍存在）是 `D:\CODE\TTS\release-validation-33216786493\artifact-9704253084.zip`，约 522,665,984 bytes；它不是完整 Artifact，不能用于验收。用户可在下一次对话中手动下载到新的干净目录。
+
+### 为什么当前包很大
+
+- `QwenASRDesktop.spec` 同时收集 `qwen_asr`、PySide6、Transformers/PyTorch 路线所需运行时、`bin/ffmpeg.exe`、`bin/ffprobe.exe` 和 `bin/PuriPulyHeartGpuWorker.exe`。模型文件明确外置，CI 还会递归拒绝 `.gguf`、`.safetensors` 和 `.part`。
+- workflow 安装 `torch==2.11.0+cu128`，因此为了支持 NVIDIA CUDA/Transformers，PyInstaller 需要带上相当大的 CUDA/PyTorch 原生 DLL。开发环境中仅 `torch` 就约 4.11 GiB；这不是误把整个 `.venv` 上传，而是双后端自包含包的主要体积来源。
+- 两个静态 FFmpeg 文件合计约 444,293,120 bytes（约 424 MiB），Vulkan worker 约 74 MiB。即使去掉 CUDA，若仍把 FFmpeg 静态打包，Vulkan 基础包也不会自然缩小到约 160 MiB。
+- “把 onedir 改成 onefile”只改变用户看到的压缩/解压方式，不会消除运行时 DLL；不能作为体积优化方案。
+
+### 与 PuriPuly-heart 的可比信息
+
+- `https://github.com/kapitalismho/PuriPuly-heart` 当前默认分支为 `dev`，GitHub 仓库 API size 约 304 MiB；这不是它的发布安装包大小。
+- PuriPuly `v2.5.0` 的 `PuriPulyHeart-Setup-2.5.0.exe` 为 168,998,431 bytes（约 161 MiB）。其公开依赖是 ONNX Runtime/Sherpa 等 Vulkan/CPU 路线，没有当前项目这样完整的 PyTorch CUDA 栈；模型按应用逻辑下载/管理。因此“源仓库大小、开发目录大小、发布安装包大小”必须分开比较。
+- 参考页面：PuriPuly README 的本地模型说明和 [v2.5.0 Release](https://github.com/kapitalismho/PuriPuly-heart/releases/tag/v2.5.0)。
+
+### 待讨论的三种发布架构
+
+1. **默认 Vulkan/GGUF，CUDA/Transformers 单独大型包（推荐先讨论）**：默认下载面向 Intel/AMD/NVIDIA Vulkan 的 GGUF 版；另发 `CUDA-Transformers` 可选包。优点是默认用户不承担 CUDA 体积，模型仍可首次下载；代价是维护两条构建/验收矩阵。若默认包仍携带静态 FFmpeg，体积下限仍约 424 MiB 加其余运行时。
+2. **小启动器/Bootstrapper**：只发布一个很小的启动器，首次运行检测 GPU/驱动，按选择下载 Vulkan 或 CUDA 运行时、模型和 FFmpeg，逐项做 HTTPS、SHA-256/签名校验并缓存。优点是首包最小；代价是首次联网、下载失败恢复、镜像/CDN、安全更新和离线使用都要设计，不能只把现有 EXE 再套一层壳。
+3. **Vulkan-only + 外部/精简媒体运行时**：去掉 Transformers/CUDA，仅保留 GGUF/Vulkan，并要求系统 FFmpeg 或改用更小的定制 FFmpeg。最接近 PuriPuly 体积，但牺牲“解压即用”的媒体依赖和 CUDA 用户覆盖面。
+
+可作为补充的低风险测量项：对已构建目录做 PyInstaller import graph、DLL 依赖和体积清单，确认是否有可安全排除的未使用模块；不能凭文件名删除 CUDA DLL，也不能破坏进程隔离或 Vulkan worker 协议。
+
+### 下一次对话的讨论顺序
+
+1. 先读本文件和 `RELEASE_PACKAGING_SIZE_DISCUSSION.md`，确认事实与限制；只做定向检查，不扫描整个仓库。
+2. 先决定产品目标：默认 GPU 覆盖（Vulkan 还是 CUDA）、是否必须离线、是否必须自带 FFmpeg、目标首包/安装后体积，以及是否接受两个下载包。
+3. 用决策矩阵比较“默认 Vulkan 包 + 可选 CUDA”“Bootstrapper”“Vulkan-only + 系统 FFmpeg”，分别记录下载体积、安装后体积、首次启动、离线能力、故障恢复、安全校验、维护成本和支持的 GPU。
+4. 方案得到用户确认后，才设计最小的 packaging/workflow 改动；先构建和清单检查，再做干净目录/普通权限的真实 EXE 验收。验收失败先记录错误和原因，不得立即打 tag。
+5. 只有完整 Artifact 下载、外层 ZIP SHA-256 与 GitHub digest 一致、解压结构完整、EXE 真机验收通过且用户再次确认后，才讨论 `v1.0.0` 发布；本交接阶段不得自行创建或推送 tag。
+
+### 发布前不可省略的验收
+
+- 在全新、非开发目录解压；不从源码、`.venv`、本机 PATH 或其他资源补文件。
+- EXE 能启动并显示 GUI；FFmpeg/FFprobe 实际可调用；Vulkan/GPU 枚举和显式设备选择正确；模型发现、下载、校验和加载流程可用；用真实音频完成一次转写。
+- 运行时路径不能指向开发目录，不能依赖本机 Python；检查包内模型排除规则和所有随包 DLL/worker 的来源。
+- 对每个候选 SKU 分别记录压缩包大小、解压后大小、启动时间、首次下载行为、错误日志和支持的 GPU/驱动范围。
+
+## 15. Windows SKU packaging implementation (2026-08-29)
+
+> 本节覆盖第 14 节中“只讨论、不得改代码/commit”的历史限制。当前工作分支为 `codex/reduce-windows-package-size`；不要 reset、rebase、force push 或覆盖已有工作。
+
+- 默认 SKU：`QwenScribe-Vulkan-Windows-x64`。只包含 Vulkan/GGUF、固定 worker、Qt/Python 和 FFmpeg/FFprobe；不安装或打包 torch、torchgen、Transformers、qwen-asr、CUDA、cuDNN、cuBLAS，也不包含模型。
+- CUDA SKU：`QwenScribe-CUDA-Windows-x64`。只包含 CUDA/Transformers 路线和独立 Transformers 子进程；不包含 Vulkan worker，也不包含模型。
+- `src/build_config.py` 是 SKU 能力的唯一声明点。PyInstaller runtime hook 固定 `QWENSCRIBE_BUILD_VARIANT`；UI 不会显示当前 SKU 不含的后端。若用户持久化了另一 SKU 的后端，显示明确提示，不静默改 GPU 或覆盖配置。
+- `requirements-common.txt`、`requirements-vulkan.txt`、`requirements-cuda.txt`、`requirements-dev.txt` 已拆分。Vulkan CI 必须在没有 torch/Transformers/qwen-asr 的全新环境中通过导入、测试和包内 `--check`。
+- `QwenASRDesktop.spec` 是参数化 onedir spec：设置 `QWENSCRIBE_BUILD_VARIANT=vulkan|cuda|full`。`full` 仅保留为显式诊断用途，并非普通 Artifact。
+- `scripts/report_package_size.ps1` 会输出 `packaging-size-report.json` 和 `.md`，区分 Git 跟踪大小、包解压大小、压缩 Artifact、FFmpeg、外置模型与首次可用下载量，并拒绝模型、缓存、日志和媒体。
+- Windows workflow 已改为两个 SKU job；每个 Artifact 同时上传 archive SHA-256、`artifact-manifest.json` 和 size report。CI 在新目录检查 variant、内置 FFmpeg/FFprobe、短 WAV、`silencedetect` 和包边界。GitHub runner 不含真实 GPU，因此真实枚举、模型下载/离线、真实音频转写仍是人工验收项。
+- 本机 Vulkan 实测（标准 ZIP，非 CI 7z）：解压 `653.81 MiB`；压缩 `253.97 MiB`；FFmpeg/FFprobe 解压 `423.71 MiB`；worker `74.17 MiB`。已达压缩 Artifact `<500 MiB` 硬目标和 `<300 MiB` 理想目标，因此当前保留自包含 FFmpeg；外置 Q6_K 模型约 `1.69 GB`，首次真正可用下载量约 `1.87 GB`。这不是干净 Windows 或真实 GPU 完整验收。
+- 已保留：Transformers 独立子进程、Vulkan 独立 worker、显式 GPU ID 严格匹配、batch size 1、partial 恢复、参数列表 FFmpeg/无窗口子进程、模型外置、TXT/分段语义。
