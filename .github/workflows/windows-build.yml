@@ -61,9 +61,9 @@ jobs:
           }
           & $python -m pip install -r '${{ matrix.requirements }}'
           if ('${{ matrix.variant }}' -eq 'vulkan') {
-            $forbidden = @('torch', 'torchgen', 'transformers', 'qwen_asr') | Where-Object {
-              & $python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$($_)') else 1)"
-              $LASTEXITCODE -eq 0
+            $forbidden = foreach ($packageName in @('torch', 'torchgen', 'transformers', 'qwen_asr')) {
+              $found = & $python -c "import importlib.util; print('present' if importlib.util.find_spec('$packageName') else '')"
+              if ($found -eq 'present') { $packageName }
             }
             if ($forbidden) { throw "Vulkan environment unexpectedly installed: $($forbidden -join ', ')" }
           }
