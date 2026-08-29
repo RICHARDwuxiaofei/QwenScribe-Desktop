@@ -4,7 +4,7 @@
 
 QwenScribe Desktop（内部项目名 QwenASRDesktop）是面向 Windows 11 的完全本地视频/音频转文字桌面应用。用户拖入或选择媒体，程序提取音频、按静音分段，并通过本地 Qwen3-ASR-1.7B 顺序识别，最终只生成 UTF-8 TXT。目标用户是希望文件不上传云端，并使用 NVIDIA CUDA 或 Vulkan GPU 本地推理的人。
 
-当前处于“源代码预发布检查点”阶段：核心 GUI、媒体处理、双推理后端、模型下载、partial 恢复、测试和 GitHub Actions onedir 构建流程均已实现；RTX 4070 SUPER 上的 Transformers 真机短音频闭环已通过，但长达两小时的完整任务和最新代码的云端打包产物仍需发布前验收。
+当前处于“v1.0.0 发布候选”阶段：核心 GUI、媒体处理、双推理后端、模型下载、partial 恢复、测试和 GitHub Actions onedir 构建流程均已实现；RTX 4070 SUPER 上的 Transformers 真机短音频闭环已通过，Windows 云端 onedir 构建及 Artifact 上传也已通过。下一步是下载并检查 Artifact、做普通权限 Windows 启动验收，然后创建 `v1.0.0` tag/Release。
 
 ## 2. Current Status
 
@@ -21,17 +21,19 @@ QwenScribe Desktop（内部项目名 QwenASRDesktop）是面向 Windows 11 的�
 - 国内/国际模型下载线路、断点续传、固定 revision/文件大小，关键权重带 SHA-256 校验。
 - platformdirs JSON 配置、轮转日志、Windows 无黑框外部进程、取消 FFmpeg。
 - pytest 基础测试和 GitHub Actions Windows onedir 构建/Release 工作流。
+- 公开仓库已建立并推送到 `https://github.com/RICHARDwuxiaofei/QwenScribe-Desktop`。
+- GitHub Actions 审核构建 `33216786493` 已成功：29 项测试、FFmpeg/FFprobe、Vulkan worker、PyInstaller onedir、模型排除检查和 Artifact 上传均通过。
 
 ### 基本完成但仍需验证
 
 - 最新 Transformers 隔离进程已在 RTX 4070 SUPER 上实际加载并识别 8 秒媒体，但修改后的完整 GUI 长任务尚未重新跑完。
 - Vulkan 后端已有设备严格选择和服务测试；发布前仍应在目标 Intel/NVIDIA 驱动上重新做真实识别。
-- PyInstaller spec 已兼容打包后的 `--transformers-worker` 入口，但最新代码尚未生成并手测 onedir 包。
-- GitHub Actions 工作流已写好，首次上传后仍需手动运行一次并核对 Artifact。
+- 云端 onedir Artifact 已生成，但尚未下载到本机解包并手测 GUI/`--transformers-worker` 入口。
+- 尚未在干净 Windows 11 电脑上验证该 Artifact 的首次模型下载和真实转写。
 
 ### 未完成
 
-- 尚无正式版本号、Release 和签名安装程序。
+- 代码版本已设为 `1.0.0`，但尚未创建 `v1.0.0` tag/GitHub Release；也没有签名安装程序。
 - 尚未完成干净 Windows 11 电脑上的从零安装/离线复测。
 - 项目自身许可证尚未确定；第三方组件说明见 `THIRD_PARTY_NOTICES.md`。
 
@@ -190,7 +192,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ## 10. Known Problems / Technical Debt
 
-- PyInstaller 的最新 Transformers 子进程入口需要首个云端 onedir Artifact 做真实验证。
+- 首个云端 onedir Artifact 已成功生成，但最新 Transformers 子进程入口仍需下载后做真实启动验证。
 - 两小时典型媒体尚未在本次检查点后完整跑完，长任务速度和取消行为仍需验收。
 - Python/qwen-asr 依赖较重；若整个项目和 `.venv` 位于 HDD，启动导入慢。当前开发机仅模型通过目录联接移动到 L 盘 NVMe。
 - 模型下载器依赖镜像可用性；网络中断可续传，但镜像服务状态不受项目控制。
@@ -201,13 +203,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ### P0
 
-- 初始化并安全发布 GitHub 仓库，运行一次手动 GitHub Actions onedir 构建。
-- 下载 Artifact，在普通权限 Windows 11 上验证 GUI 启动和 Transformers worker 打包入口。
+- 从成功运行 `33216786493` 下载 `QwenScribe-Desktop-Windows-x64` Artifact，核对其中的 SHA-256、分卷完整性、EXE/FFmpeg/Vulkan worker 和模型排除情况。
+- 在普通权限 Windows 11 上解压并验证 GUI 启动、语言切换、拖放、设备枚举和 Transformers worker 打包入口。
+- 验证通过后，在最终 handoff/docs 提交上创建并推送 `v1.0.0` tag；监控 tag 构建自动生成 GitHub Release，禁止 force push。
 
 ### P1
 
 - 用较长真实媒体分别验证 CUDA、取消/partial、第二任务模型复用；如计划支持核显，再复测 Vulkan。
-- 确定项目许可证，并准备首个版本标签和 Release 说明。
+- 确定项目许可证；补齐/审核 v1.0.0 中英文 Release 说明。
 
 ### P2
 
@@ -233,8 +236,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 - 日期：2026-08-29
 - branch：`main`
-- 基础检查点 commit：`9ee4094c979c7e9f48c8c7d76e7260564423d154`；当前 HEAD 请运行 `git rev-parse HEAD`
-- 阶段：QwenScribe Desktop v1.0.0 发布候选，等待首次 GitHub 云构建审核
-- 未提交修改：发布提交前以 `git status` 为准
-- 最后验证：`compileall` 通过；pytest 29 项通过（含 i18n GUI 切换）；RTX 4070 SUPER 实际加载本地 Qwen3-ASR-1.7B 成功（16.33 秒）；从真实 MP4 截取 8 秒音频完成转写（加载加识别 23.50 秒，58 字符，Chinese）
-- 未执行：最新 GUI 完整长任务、最新 PyInstaller onedir 构建、GitHub Actions、干净机器安装验收
+- 本次交接前代码 commit：`4742c052d9c08c6d9368ab37ed1206a0149761e7`（本文件随后会有一个 handoff 提交）
+- 阶段：QwenScribe Desktop v1.0.0 发布候选；云构建已通过，尚未打 tag/发布 Release
+- GitHub：`https://github.com/RICHARDwuxiaofei/QwenScribe-Desktop`（public），remote `origin`，禁止 force push
+- 云构建：Actions run `33216786493` 成功，job `99002098086`，耗时 28m46s；Artifact `QwenScribe-Desktop-Windows-x64`，ID `9704253084`，GitHub 外层归档大小 `2254013387` bytes，尚未下载验包
+- workflow 修复：pytest 使用 `--basetemp=.pytest_tmp` 且 `.gitignore` 已忽略；FFmpeg 从 Chocolatey 实际安装目录递归取二进制；大型包直接使用 1800 MiB 分卷 7z，避免先压超大 ZIP 再重压
+- 未提交修改：提交本次 handoff 后应为干净工作树；新 AI 必须先运行 `git status` 和 `git log -10 --oneline`
+- 最后验证：本地 pytest 29 项通过（使用系统 Python 3.12 加载现有 `.venv` site-packages，因为 `.venv` 启动器记录的旧 Python 路径失效）；云端 pytest 29 项通过；云端 FFmpeg/Vulkan/PyInstaller/模型排除/Artifact 上传通过；RTX 4070 SUPER 实际加载本地 Qwen3-ASR-1.7B 成功（16.33 秒）；真实 MP4 的 8 秒音频完成转写（加载加识别 23.50 秒，58 字符，Chinese）
+- 未执行：下载并解包本次 Artifact、打包 EXE 真机启动、最新 GUI 完整长任务、干净机器安装验收、`v1.0.0` tag 和 GitHub Release
