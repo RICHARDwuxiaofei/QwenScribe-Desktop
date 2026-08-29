@@ -15,6 +15,7 @@ Set-StrictMode -Version Latest
 function Get-ByteTotal($Items) {
     [long]$total = 0
     foreach ($item in @($Items)) {
+        if ($null -eq $item) { continue }
         if ($null -ne $item.PSObject.Properties["Length"]) {
             $total += [long]$item.Length
         } elseif ($null -ne $item.PSObject.Properties["bytes"]) {
@@ -37,7 +38,27 @@ function Get-Category([string]$RelativePath) {
 
 function Test-Forbidden([string]$RelativePath) {
     $path = $RelativePath.Replace("/", "\").ToLowerInvariant()
-    return $path -match "\\.venv(\\|$)|\\(pip|wheel|pytest)_?cache(\\|$)|\\.pytest_cache(\\|$)|\\logs?(\\|$)|\\downloads?(\\|$)|\\.(gguf|safetensors|part|log|mp4|mkv|mov|avi|webm|m4v|mp3|wav|flac|m4a|aac|ogg)$|\\(media|videos?|audio)(\\|$)"
+    $segments = @($path -split "\\")
+    $forbiddenDirectories = @(
+        ".venv",
+        ".pytest_cache",
+        "pip-cache",
+        "pip_cache",
+        "wheel-cache",
+        "wheel_cache"
+    )
+    if ($segments | Where-Object { $_ -in $forbiddenDirectories }) {
+        return $true
+    }
+
+    # Only actual payload files are forbidden. Package/module names such as
+    # ``safetensors``, ``audio`` and ``download`` are valid CUDA dependencies.
+    $extension = [System.IO.Path]::GetExtension($path)
+    return $extension -in @(
+        ".gguf", ".safetensors", ".part", ".log",
+        ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v",
+        ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"
+    )
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
