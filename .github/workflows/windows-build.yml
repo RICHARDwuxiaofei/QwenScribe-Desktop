@@ -52,19 +52,22 @@ jobs:
       - name: Install Python build dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
+          python -m venv .build-venv
+          $python = (Resolve-Path .build-venv\Scripts\python.exe).Path
+          & $python -m pip install --upgrade pip
+          & $python -m pip install -r requirements-dev.txt
           if ('${{ matrix.variant }}' -eq 'cuda') {
-            python -m pip install "torch==$env:PYTORCH_VERSION" --index-url $env:PYTORCH_INDEX_URL
+            & $python -m pip install "torch==$env:PYTORCH_VERSION" --index-url $env:PYTORCH_INDEX_URL
           }
-          python -m pip install -r '${{ matrix.requirements }}'
+          & $python -m pip install -r '${{ matrix.requirements }}'
           if ('${{ matrix.variant }}' -eq 'vulkan') {
             $forbidden = @('torch', 'torchgen', 'transformers', 'qwen_asr') | Where-Object {
-              python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$($_)') else 1)"
+              & $python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$($_)') else 1)"
               $LASTEXITCODE -eq 0
             }
             if ($forbidden) { throw "Vulkan environment unexpectedly installed: $($forbidden -join ', ')" }
           }
+          (Resolve-Path .build-venv\Scripts).Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Run tests
         shell: pwsh
