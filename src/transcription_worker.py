@@ -60,10 +60,12 @@ class TranscriptionWorker(QObject):
         self,
         application_directory: Path,
         model_service: Any | None = None,
+        supported_backends: frozenset[str] | None = None,
     ) -> None:
         super().__init__()
         self._application_directory = Path(application_directory)
         self._model_service = model_service or ModelService()
+        self._supported_backends = supported_backends or frozenset({"transformers", "vulkan"})
         self._media_service: MediaService | None = None
         self._cancel_event = threading.Event()
         self._busy_lock = threading.Lock()
@@ -112,38 +114,40 @@ class TranscriptionWorker(QObject):
         """Enumerate every CUDA/Vulkan device without blocking the Qt GUI."""
         cuda_devices: list[tuple[str, str]] = []
         vulkan_devices: list[tuple[str, str]] = []
-        try:
-            import torch
+        if "transformers" in self._supported_backends:
+            try:
+                import torch
 
-            if torch.cuda.is_available():
-                for index in range(torch.cuda.device_count()):
-                    properties = torch.cuda.get_device_properties(index)
-                    total_gib = float(properties.total_memory) / (1024.0**3)
-                    cuda_devices.append(
-                        (
-                            f"cuda:{index}",
-                            f"CUDA cuda:{index}：{properties.name}（{total_gib:.1f} GB）",
+                if torch.cuda.is_available():
+                    for index in range(torch.cuda.device_count()):
+                        properties = torch.cuda.get_device_properties(index)
+                        total_gib = float(properties.total_memory) / (1024.0**3)
+                        cuda_devices.append(
+                            (
+                                f"cuda:{index}",
+                                f"CUDA cuda:{index}：{properties.name}（{total_gib:.1f} GB）",
+                            )
                         )
-                    )
-        except Exception:
-            LOGGER.exception("后台枚举 CUDA 设备失败")
+            except Exception:
+                LOGGER.exception("后台枚举 CUDA 设备失败")
 
         discovery_service = None
-        try:
-            from .vulkan_model_service import VulkanModelService
+        if "vulkan" in self._supported_backends:
+            try:
+                from .vulkan_model_service import VulkanModelService
 
-            discovery_service = VulkanModelService(
-                self._application_directory, device_id="auto"
-            )
-            vulkan_devices = [
-                (device.device_id, device.display_label)
-                for device in discovery_service.discover_devices()
-            ]
-        except Exception:
-            LOGGER.exception("后台枚举 Vulkan 设备失败")
-        finally:
-            if discovery_service is not None:
-                discovery_service.close()
+                discovery_service = VulkanModelService(
+                    self._application_directory, device_id="auto"
+                )
+                vulkan_devices = [
+                    (device.device_id, device.display_label)
+                    for device in discovery_service.discover_devices()
+                ]
+            except Exception:
+                LOGGER.exception("后台枚举 Vulkan 设备失败")
+            finally:
+                if discovery_service is not None:
+                    discovery_service.close()
         self.devices_discovered.emit(cuda_devices, vulkan_devices)
 
     @Slot()

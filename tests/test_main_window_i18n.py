@@ -58,3 +58,25 @@ def test_main_window_switches_between_chinese_and_english(
     assert window.language_combo.itemText(0) == "自动识别"
     window.close()
     app.processEvents()
+
+
+def test_vulkan_sku_hides_transformers_controls(tmp_path: Path, monkeypatch: object) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        TranscriptionWorker, "discover_devices", lambda self: None
+    )
+    config = ConfigService(tmp_path / "config.json")
+    window = MainWindow(
+        config_service=config,
+        model_service=_FakeModelService(),
+        active_backend="vulkan",
+        supported_backends=frozenset({"vulkan"}),
+        vulkan_devices=[("vulkan-index-1", "Vulkan: Test GPU")],
+    )
+
+    assert window.backend_combo.count() == 1
+    assert window.backend_combo.currentData() == "vulkan"
+    assert window.model_combo.count() == 1
+    assert window.model_combo.currentData() == "vulkan"
+    window.close()
+    app.processEvents()

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from .config_service import ConfigService
+from .build_config import current_build
 from .i18n import (
     STATIC_EN,
     UI_LANGUAGES,
@@ -224,6 +225,8 @@ class MainWindow(QMainWindow):
         active_backend: str = "transformers",
         cuda_devices: list[tuple[str, str]] | None = None,
         vulkan_devices: list[tuple[str, str]] | None = None,
+        supported_backends: frozenset[str] | None = None,
+        unsupported_backend_message: str | None = None,
     ) -> None:
         super().__init__()
         self.setAcceptDrops(True)
@@ -237,6 +240,8 @@ class MainWindow(QMainWindow):
         self._task_active = False
         self._backend_available = False
         self._active_backend = active_backend
+        self._supported_backends = supported_backends or current_build().backends
+        self._unsupported_backend_message = unsupported_backend_message
         self._cuda_devices = list(cuda_devices or [])
         self._vulkan_devices = list(vulkan_devices or [])
         self._device_discovery_complete = bool(cuda_devices or vulkan_devices)
@@ -264,6 +269,8 @@ class MainWindow(QMainWindow):
         self._restore_settings()
         self._connect_ui()
         self._start_worker_thread(model_service)
+        if self._unsupported_backend_message:
+            QTimer.singleShot(0, self._show_unsupported_backend_message)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -359,13 +366,17 @@ class MainWindow(QMainWindow):
         compute_row = QHBoxLayout()
         compute_row.addWidget(QLabel("推理方式"))
         self.backend_combo = QComboBox()
-        self.backend_combo.addItem("官方 Transformers（PyTorch CUDA）", "transformers")
-        self.backend_combo.addItem("transcribe.cpp（Vulkan GGUF）", "vulkan")
+        if "transformers" in self._supported_backends:
+            self.backend_combo.addItem("官方 Transformers（PyTorch CUDA）", "transformers")
+        if "vulkan" in self._supported_backends:
+            self.backend_combo.addItem("transcribe.cpp（Vulkan GGUF）", "vulkan")
         compute_row.addWidget(self.backend_combo, 2)
         compute_row.addWidget(QLabel("模型"))
         self.model_combo = QComboBox()
-        self.model_combo.addItem("Qwen3-ASR-1.7B 官方 BF16/FP16", "transformers")
-        self.model_combo.addItem("Qwen3-ASR-1.7B Q6_K GGUF", "vulkan")
+        if "transformers" in self._supported_backends:
+            self.model_combo.addItem("Qwen3-ASR-1.7B 官方 BF16/FP16", "transformers")
+        if "vulkan" in self._supported_backends:
+            self.model_combo.addItem("Qwen3-ASR-1.7B Q6_K GGUF", "vulkan")
         compute_row.addWidget(self.model_combo, 2)
         compute_row.addWidget(QLabel("GPU"))
         self.device_combo = QComboBox()
@@ -496,7 +507,11 @@ class MainWindow(QMainWindow):
         # can terminate python312.dll with 0xC0000005 instead of raising a
         # Python exception.
         self._worker_thread.setStackSize(64 * 1024 * 1024)
-        self._worker = TranscriptionWorker(application_directory, model_service=model_service)
+        self._worker = TranscriptionWorker(
+            application_directory,
+            model_service=model_service,
+            supported_backends=self._supported_backends,
+        )
         self._worker.moveToThread(self._worker_thread)
         self.start_requested.connect(self._worker.start_task)
         self.gpu_probe_requested.connect(self._worker.detect_gpu)
@@ -799,6 +814,14 @@ class MainWindow(QMainWindow):
         self._populate_device_combo(backend, selected)
         self._config.set("inference_backend", backend)
         self._mark_backend_restart_if_needed()
+
+    def _show_unsupported_backend_message(self) -> None:
+        message = self._unsupported_backend_message
+        if not message:
+            return
+        self.status_label.setText(message)
+        self._append_log(message)
+        QMessageBox.warning(self, self._t("后端不可用", "Backend unavailable"), message)
 
     def _on_model_changed(self, _index: int) -> None:
         backend = str(self.model_combo.currentData() or "transformers")

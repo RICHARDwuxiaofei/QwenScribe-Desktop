@@ -1,3 +1,4 @@
--r requirements.txt
+# Test and packaging tools; backend requirements are selected by the build SKU.
+-r requirements-common.txt
 pytest>=8.3,<9
 pyinstaller>=6.11,<7
