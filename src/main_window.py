@@ -104,16 +104,23 @@ class ModelDownloadWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, backend: str, region: str) -> None:
+    def __init__(
+        self,
+        backend: str,
+        region: str,
+        cancel_event: threading.Event,
+        download_service: ModelDownloadService | None = None,
+    ) -> None:
         super().__init__()
         self.backend = backend
         self.region = region
-        self.cancel_event = threading.Event()
+        self.cancel_event = cancel_event
+        self.download_service = download_service or ModelDownloadService()
 
     @Slot()
     def run(self) -> None:
         try:
-            path = ModelDownloadService().download(
+            path = self.download_service.download(
                 self.backend,  # type: ignore[arg-type]
                 self.region,  # type: ignore[arg-type]
                 self.cancel_event,
@@ -129,6 +136,7 @@ class ModelDownloadWorker(QObject):
 
     def request_cancel(self) -> None:
         self.cancel_event.set()
+        self.download_service.abort_active_io()
 
 
 class DropArea(QFrame):
@@ -259,6 +267,8 @@ class MainWindow(QMainWindow):
         self._download_thread: QThread | None = None
         self._download_worker: ModelDownloadWorker | None = None
         self._download_dialog: QProgressDialog | None = None
+        self._download_cancel_event: threading.Event | None = None
+        self._download_service: ModelDownloadService | None = None
 
         self.setWindowTitle("QwenScribe Desktop")
         self.setMinimumSize(980, 700)
@@ -946,6 +956,10 @@ class MainWindow(QMainWindow):
 
     def _start_model_download(self, backend: str, region: str) -> None:
         self._download_active = True
+        cancel_event = threading.Event()
+        download_service = ModelDownloadService()
+        self._download_cancel_event = cancel_event
+        self._download_service = download_service
         self._set_controls_for_task(True)
         self.cancel_button.setEnabled(False)
         dialog = QProgressDialog(
@@ -962,7 +976,7 @@ class MainWindow(QMainWindow):
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
         dialog.setAutoReset(False)
-        worker = ModelDownloadWorker(backend, region)
+        worker = ModelDownloadWorker(backend, region, cancel_event, download_service)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -972,7 +986,7 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(self._on_model_download_cancelled)
         for signal in (worker.completed, worker.failed, worker.cancelled):
             signal.connect(thread.quit)
-        dialog.canceled.connect(worker.request_cancel)
+        dialog.canceled.connect(self._request_model_download_cancel)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._clear_download_thread_refs)
         thread.finished.connect(thread.deleteLater)
@@ -1007,12 +1021,29 @@ class MainWindow(QMainWindow):
         if self._download_dialog is not None:
             self._download_dialog.close()
         self._download_dialog = None
-        self._download_active = False
-        self._set_controls_for_task(False)
 
     def _clear_download_thread_refs(self) -> None:
         self._download_worker = None
         self._download_thread = None
+        self._download_service = None
+        self._download_cancel_event = None
+        self._download_active = False
+        self._set_controls_for_task(False)
+
+    def _request_model_download_cancel(self) -> None:
+        event = self._download_cancel_event
+        if event is None or event.is_set():
+            return
+        event.set()
+        if self._download_service is not None:
+            self._download_service.abort_active_io()
+        self.status_label.setText(
+            self._t("正在取消模型下载…", "Cancelling model download…")
+        )
+        if self._download_dialog is not None:
+            self._download_dialog.setLabelText(
+                self._t("正在取消下载，请稍候…", "Cancelling download, please wait…")
+            )
 
     def _on_model_download_completed(self, path: str) -> None:
         self._finish_model_download_ui()
@@ -1392,11 +1423,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            if answer == QMessageBox.StandardButton.Yes and self._download_worker is not None:
-                self._download_worker.request_cancel()
-                self.status_label.setText(
-                    self._t("正在取消模型下载…", "Cancelling model download…")
-                )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._request_model_download_cancel()
             event.ignore()
             return
         if self._task_active:

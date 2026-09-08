@@ -6,16 +6,15 @@ import hashlib
 import logging
 import os
 import threading
+from collections.abc import Callable
+from http.client import IncompleteRead
 from pathlib import Path
-from typing import Callable
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .model_catalog import (
-    BackendName,
-    DownloadRegion,
-    ModelFile,
     TRANSFORMERS_FILES,
     TRANSFORMERS_MODEL_ID,
     TRANSFORMERS_REVISION,
@@ -24,13 +23,16 @@ from .model_catalog import (
     VULKAN_REVISION,
     VULKAN_SHA256,
     VULKAN_SIZE,
+    BackendName,
+    DownloadRegion,
+    ModelFile,
     download_target,
     is_complete_model,
 )
 
-
 LOGGER = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, int, str], None]
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 
 class ModelDownloadError(RuntimeError):
@@ -46,6 +48,34 @@ class ModelDownloadService:
 
     def __init__(self, *, timeout_seconds: float = 60.0) -> None:
         self.timeout_seconds = timeout_seconds
+        self._response_lock = threading.Lock()
+        self._active_response: Any | None = None
+
+    def abort_active_io(self) -> None:
+        """Close the current HTTP response so a blocked read can unwind.
+
+        ``HTTPResponse.close`` is the public urllib API and is safe to call
+        from the GUI thread while the download worker is blocked in ``read``.
+        The cancellation event remains the source of truth for classifying any
+        exception raised as the response is closed.
+        """
+        with self._response_lock:
+            response = self._active_response
+        if response is None:
+            return
+        try:
+            response.close()
+        except Exception:
+            LOGGER.debug("关闭活动下载响应失败", exc_info=True)
+
+    def _set_active_response(self, response: Any) -> None:
+        with self._response_lock:
+            self._active_response = response
+
+    def _clear_active_response(self, response: Any) -> None:
+        with self._response_lock:
+            if self._active_response is response:
+                self._active_response = None
 
     def download(
         self,
@@ -87,6 +117,7 @@ class ModelDownloadService:
                 cancel_event,
                 lambda current: progress(current, VULKAN_SIZE, VULKAN_FILENAME),
             )
+        self._check_cancel(cancel_event)
         if not is_complete_model(backend, target):
             raise ModelDownloadError("下载结束，但模型文件不完整")
         return target
@@ -125,6 +156,7 @@ class ModelDownloadService:
         cancel_event: threading.Event,
         progress: Callable[[int], None],
     ) -> None:
+        self._check_cancel(cancel_event)
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_name(destination.name + ".part")
         existing = partial.stat().st_size if partial.is_file() else 0
@@ -140,28 +172,46 @@ class ModelDownloadService:
         request = Request(url, headers=headers)
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
-                status = int(getattr(response, "status", response.getcode()))
-                append = existing > 0 and status == 206
-                if existing and not append:
-                    existing = 0
-                mode = "ab" if append else "wb"
-                current = existing
-                progress(current)
-                with partial.open(mode) as handle:
-                    while True:
-                        self._check_cancel(cancel_event)
-                        block = response.read(1024 * 1024)
-                        if not block:
-                            break
-                        handle.write(block)
-                        current += len(block)
-                        progress(current)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                self._set_active_response(response)
+                try:
+                    status = int(getattr(response, "status", response.getcode()))
+                    append = existing > 0 and status == 206
+                    if existing and not append:
+                        existing = 0
+                    mode = "ab" if append else "wb"
+                    current = existing
+                    progress(current)
+                    reader = getattr(response, "read1", response.read)
+                    with partial.open(mode) as handle:
+                        while True:
+                            self._check_cancel(cancel_event)
+                            block = reader(DOWNLOAD_CHUNK_SIZE)
+                            self._check_cancel(cancel_event)
+                            if not block:
+                                break
+                            handle.write(block)
+                            current += len(block)
+                            progress(current)
+                            self._check_cancel(cancel_event)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                finally:
+                    self._clear_active_response(response)
         except ModelDownloadCancelled:
             raise
-        except (HTTPError, URLError, TimeoutError, OSError) as error:
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+            EOFError,
+            IncompleteRead,
+            ValueError,
+        ) as error:
+            if cancel_event.is_set():
+                raise ModelDownloadCancelled("用户取消了模型下载") from error
             raise ModelDownloadError(f"下载 {item.relative_path} 失败：{error}") from error
+        self._check_cancel(cancel_event)
         if partial.stat().st_size != item.size_bytes:
             raise ModelDownloadError(
                 f"{item.relative_path} 大小不正确："
@@ -178,6 +228,7 @@ class ModelDownloadService:
         cancel_event: threading.Event,
         progress: Callable[[int], None],
     ) -> None:
+        self._check_cancel(cancel_event)
         if item.sha256 is not None:
             progress(item.size_bytes)
             actual = self._sha256(partial, cancel_event)
@@ -186,14 +237,18 @@ class ModelDownloadService:
                 raise ModelDownloadError(
                     f"{item.relative_path} SHA-256 校验失败，损坏文件已删除，请重试"
                 )
+        self._check_cancel(cancel_event)
         os.replace(partial, destination)
 
     @staticmethod
     def _sha256(path: Path, cancel_event: threading.Event) -> str:
         digest = hashlib.sha256()
         with path.open("rb") as handle:
-            while block := handle.read(4 * 1024 * 1024):
+            while True:
                 ModelDownloadService._check_cancel(cancel_event)
+                block = handle.read(4 * 1024 * 1024)
+                if not block:
+                    break
                 digest.update(block)
         return digest.hexdigest()
 

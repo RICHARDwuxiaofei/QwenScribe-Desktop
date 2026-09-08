@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -113,6 +114,29 @@ def test_vulkan_sku_hides_transformers_controls(tmp_path: Path, monkeypatch: obj
     assert window.model_combo.currentData() == "vulkan"
     window.close()
     app.processEvents()
+
+
+def test_model_download_cancel_sets_shared_event_immediately(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(TranscriptionWorker, "discover_devices", lambda self: None)
+    config = ConfigService(tmp_path / "config.json")
+    window = MainWindow(
+        config_service=config,
+        model_service=_FakeModelService(),
+        active_backend="vulkan",
+        supported_backends=frozenset({"vulkan"}),
+    )
+    try:
+        event = threading.Event()
+        window._download_cancel_event = event
+        window._request_model_download_cancel()
+        assert event.is_set()
+        assert "取消" in window.status_label.text()
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_selected_igpu_requires_visible_restart_hint_until_relaunch(tmp_path, monkeypatch):
