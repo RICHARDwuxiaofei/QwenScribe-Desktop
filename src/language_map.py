@@ -42,6 +42,25 @@ LANGUAGE_MAP: "OrderedDict[str, str | None]" = OrderedDict(
 )
 
 
+# transcribe-cpp 0.1.3 validates BCP-47 codes before constructing the Qwen
+# language prompt; Transformers instead accepts the canonical names above.
+VULKAN_LANGUAGE_CODES = {
+    "Chinese": "zh", "English": "en", "Cantonese": "yue",
+    "Arabic": "ar", "German": "de", "French": "fr", "Spanish": "es",
+    "Portuguese": "pt", "Indonesian": "id", "Italian": "it", "Korean": "ko",
+    "Russian": "ru", "Thai": "th", "Vietnamese": "vi", "Japanese": "ja",
+    "Turkish": "tr", "Hindi": "hi", "Malay": "ms", "Dutch": "nl",
+    "Swedish": "sv", "Danish": "da", "Finnish": "fi", "Polish": "pl",
+    "Czech": "cs", "Filipino": "fil", "Persian": "fa", "Greek": "el",
+    "Romanian": "ro", "Hungarian": "hu", "Macedonian": "mk",
+}
+
+
+def vulkan_language_hint(language: str | None) -> str | None:
+    """Adapt canonical UI names while retaining None and explicit worker codes."""
+    return VULKAN_LANGUAGE_CODES.get(language, language)
+
+
 def language_for_label(label: str) -> str | None:
     """Return the canonical model language for a UI label."""
     if label not in LANGUAGE_MAP:

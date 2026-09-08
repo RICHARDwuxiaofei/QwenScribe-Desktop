@@ -166,10 +166,12 @@ class TranscriptionWorker(QObject):
             self._task_pending = False
             cancelled_before_start = self._pending_cancel
             self._pending_cancel = False
-        if cancelled_before_start:
-            self._cancel_event.set()
-        else:
-            self._cancel_event.clear()
+            # Publish busy state and reset the event atomically with respect to
+            # request_cancel; clearing it after unlocking loses a new cancellation.
+            if cancelled_before_start:
+                self._cancel_event.set()
+            else:
+                self._cancel_event.clear()
         self.task_started.emit()
         self.progress_changed.emit(0)
 
@@ -177,6 +179,8 @@ class TranscriptionWorker(QObject):
         final_path: Path | None = None
         reservation_path: Path | None = None
         completed_successfully = False
+        terminal_signal = None
+        terminal_args: tuple[str, ...] = ()
         try:
             self._check_cancelled()
             self._media_service = self._media_service or MediaService(
@@ -195,6 +199,7 @@ class TranscriptionWorker(QObject):
             self._partial_handle = None
             self._set_status("正在保存文本")
             self.progress_changed.emit(98)
+            self._check_cancelled()
             if final_path.exists():
                 raise TranscriptionError(
                     f"输出文件在转写期间被其他程序创建，已保留部分结果：{partial_path}"
@@ -204,7 +209,8 @@ class TranscriptionWorker(QObject):
             self.progress_changed.emit(100)
             self._set_status("已完成")
             self.user_log.emit(f"转写完成：{final_path}")
-            self.task_completed.emit(str(final_path))
+            terminal_signal = self.task_completed
+            terminal_args = (str(final_path),)
         except UserCancelledError:
             self._set_status("已取消")
             retained = str(partial_path) if partial_path and partial_path.exists() else ""
@@ -212,7 +218,8 @@ class TranscriptionWorker(QObject):
                 self.user_log.emit(f"已取消，已识别内容保存在：{retained}")
             else:
                 self.user_log.emit("已取消，尚未生成部分文本")
-            self.task_cancelled.emit(retained)
+            terminal_signal = self.task_cancelled
+            terminal_args = (retained,)
         except Exception as error:
             LOGGER.error("转写任务失败\n%s", traceback.format_exc())
             self._set_status("发生错误")
@@ -221,7 +228,8 @@ class TranscriptionWorker(QObject):
             if retained:
                 summary = f"{summary}\n已保留部分结果：{retained}"
             self.user_log.emit(summary)
-            self.task_failed.emit(summary, retained)
+            terminal_signal = self.task_failed
+            terminal_args = (summary, retained)
         finally:
             self._partial_handle = None
             if reservation_path is not None:
@@ -243,6 +251,10 @@ class TranscriptionWorker(QObject):
                 self._busy = False
                 self._task_pending = False
                 self._pending_cancel = False
+        # The GUI may enqueue (and cancel) the next task as soon as it receives
+        # this signal. Do not clear its pending state during the previous cleanup.
+        if terminal_signal is not None:
+            terminal_signal.emit(*terminal_args)
 
     def _execute_task(self, task: TranscriptionTask) -> None:
         assert self._media_service is not None

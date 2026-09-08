@@ -10,12 +10,14 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Any
 from uuid import uuid4
 
 from .exceptions import ModelLoadError, TranscriptionError
+from .language_map import vulkan_language_hint
 from .model_catalog import VULKAN_FILENAME, find_installed_model
 from .model_service import TranscriptionResult
 
@@ -91,6 +93,9 @@ class VulkanModelService:
 
     @property
     def is_loaded(self) -> bool:
+        if self._process is None or self._process.poll() is not None:
+            self._loaded = False
+            self._active_device = None
         return self._loaded
 
     @property
@@ -130,7 +135,7 @@ class VulkanModelService:
         return devices
 
     def load(self) -> None:
-        if self._loaded:
+        if self.is_loaded:
             return
         try:
             devices = self.discover_devices()
@@ -173,7 +178,7 @@ class VulkanModelService:
             ) from error
 
     def transcribe(self, audio_path: Path, language: str | None) -> TranscriptionResult:
-        if not self._loaded:
+        if not self.is_loaded:
             raise TranscriptionError("Vulkan 模型尚未加载")
         if audio_path.suffix.lower() != ".wav":
             raise TranscriptionError("Vulkan worker 仅接受 16 kHz 单声道 PCM WAV 片段")
@@ -183,7 +188,7 @@ class VulkanModelService:
                 timeout=900.0,
                 channel="self",
                 audio_path=str(audio_path.resolve()),
-                language_hint=language,
+                language_hint=vulkan_language_hint(language),
             )
             raw = payload.get("transcription")
             if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
@@ -221,6 +226,11 @@ class VulkanModelService:
                 self._request("shutdown", timeout=3.0)
             except Exception:
                 LOGGER.debug("Vulkan worker 未正常响应关闭请求", exc_info=True)
+        self._dispose_worker()
+
+    def _dispose_worker(self) -> None:
+        """Release a broken session without sending another protocol request."""
+        process = self._process
         if process is not None and process.poll() is None:
             try:
                 process.wait(timeout=2.0)
@@ -230,6 +240,7 @@ class VulkanModelService:
                     process.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    process.wait(timeout=2.0)
         for resource in (self._stream, self._connection, self._server):
             if resource is not None:
                 try:
@@ -249,7 +260,7 @@ class VulkanModelService:
     def _ensure_worker(self) -> None:
         if self._process is not None and self._process.poll() is None and self._stream is not None:
             return
-        self.close()
+        self._dispose_worker()
         executable = self._resolve_executable_path()
         if not executable.is_file():
             raise ModelLoadError(f"找不到 Vulkan worker：{executable}")
@@ -341,29 +352,40 @@ class VulkanModelService:
                 "request_id": request_id,
                 **fields,
             }
-            self._connection.settimeout(timeout)
-            encoded = json.dumps(request, ensure_ascii=True, separators=(",", ":"))
-            self._stream.write(encoded.encode("utf-8") + b"\n")
-            self._stream.flush()
-            while True:
-                frame = self._read_frame()
-                if frame.get("type") != "response" or frame.get("request_id") != request_id:
-                    continue
-                if frame.get("status") != "ok":
-                    details = frame.get("payload")
-                    raise VulkanWorkerError(
-                        str(frame.get("error_code", "worker_failure")),
-                        details if isinstance(details, dict) else {},
-                    )
-                payload = frame.get("payload")
-                if not isinstance(payload, dict):
-                    raise VulkanWorkerError("response_invalid")
-                return payload
+            deadline = time.monotonic() + timeout
+            try:
+                self._connection.settimeout(timeout)
+                encoded = json.dumps(request, ensure_ascii=True, separators=(",", ":"))
+                self._stream.write(encoded.encode("utf-8") + b"\n")
+                self._stream.flush()
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"Vulkan {request_type} 请求超时")
+                    self._connection.settimeout(remaining)
+                    frame = self._read_frame()
+                    if frame.get("type") == "response" and frame.get("request_id") == request_id:
+                        break
+            except (OSError, VulkanWorkerError):
+                # A timed-out or broken stream cannot be reused safely. The next
+                # task must activate a fresh worker instead of reusing stale state.
+                self._dispose_worker()
+                raise
+            if frame.get("status") != "ok":
+                details = frame.get("payload")
+                raise VulkanWorkerError(
+                    str(frame.get("error_code", "worker_failure")),
+                    details if isinstance(details, dict) else {},
+                )
+            payload = frame.get("payload")
+            if not isinstance(payload, dict):
+                raise VulkanWorkerError("response_invalid")
+            return payload
 
     def _read_frame(self) -> dict[str, Any]:
         if self._stream is None:
             raise VulkanWorkerError("worker_closed")
-        raw = self._stream.readline()
+        raw = self._stream.readline(4 * 1024 * 1024 + 1)
         if not raw:
             code = self._process.poll() if self._process is not None else None
             raise VulkanWorkerError(f"worker_closed_{code}")
