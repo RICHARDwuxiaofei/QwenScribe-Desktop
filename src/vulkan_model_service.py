@@ -17,6 +17,7 @@ from typing import BinaryIO, Any
 from uuid import uuid4
 
 from .exceptions import ModelLoadError, TranscriptionError
+from .device_discovery import DiscoveryResult
 from .language_map import vulkan_language_hint
 from .model_catalog import VULKAN_FILENAME, find_installed_model
 from .model_service import TranscriptionResult
@@ -90,6 +91,9 @@ class VulkanModelService:
         self._loaded = False
         self._active_device: VulkanDevice | None = None
         self._request_lock = threading.Lock()
+        self._stderr_thread: threading.Thread | None = None
+        self._discovery_details: dict[str, Any] = {}
+        self.actual_backend: str | None = None
 
     @property
     def is_loaded(self) -> bool:
@@ -126,13 +130,41 @@ class VulkanModelService:
     def discover_devices(self) -> tuple[VulkanDevice, ...]:
         self._ensure_worker()
         payload = self._request("discover", timeout=20.0)
+        diagnostic = payload.get("diagnostic")
+        self._discovery_details = diagnostic if isinstance(diagnostic, dict) else {}
+        LOGGER.info("Vulkan discovery diagnostic: %s", self._discovery_details)
+        if self._discovery_details.get("error"):
+            error = self._discovery_details["error"]
+            if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+                raise VulkanWorkerError("discovery_invalid")
+            raise VulkanWorkerError(error["code"], self._discovery_details)
         raw_devices = payload.get("devices")
         if not isinstance(raw_devices, list):
             raise VulkanWorkerError("discovery_invalid")
         devices = tuple(self._device_from_payload(item) for item in raw_devices)
-        if not devices:
-            raise VulkanWorkerError("device_unavailable")
         return devices
+
+    def discover_result(self) -> DiscoveryResult:
+        try:
+            devices = self.discover_devices()
+            return DiscoveryResult("vulkan", tuple((d.device_id, d.display_label) for d in devices),
+                                   details=self._discovery_details)
+        except Exception as error:
+            LOGGER.exception("Vulkan discovery failed: %s", getattr(error, "details", {}))
+            code = error.code if isinstance(error, VulkanWorkerError) else "discovery_exception"
+            return DiscoveryResult("vulkan", ok=False, error_code=code,
+                                   error_message=self._friendly_error(error),
+                                   details={"exception": repr(error), **getattr(error, "details", {})})
+
+    @staticmethod
+    def _drain_stderr(stream: BinaryIO) -> None:
+        # Bounded reads also drain native messages without newlines. Application
+        # logging rotates this output; launch manifests and tokens are not logged.
+        try:
+            while chunk := stream.read1(4096):
+                LOGGER.warning("Vulkan worker stderr: %s", chunk.decode("utf-8", errors="replace"))
+        finally:
+            stream.close()
 
     def load(self) -> None:
         if self.is_loaded:
@@ -152,6 +184,11 @@ class VulkanModelService:
             activation = payload.get("activation")
             if not isinstance(activation, dict):
                 raise VulkanWorkerError("activation_invalid")
+            actual_backend = activation.get("actual_backend")
+            if not isinstance(actual_backend, str) or not actual_backend.lower().startswith("vulkan"):
+                self.close()
+                raise VulkanWorkerError("strict_vulkan_rejected")
+            self.actual_backend = actual_backend
             raw_device = activation.get("device")
             active = self._device_from_payload(raw_device)
             if self.device_id != "auto" and active.device_id != requested.device_id:
@@ -241,6 +278,9 @@ class VulkanModelService:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=2.0)
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+            self._stderr_thread = None
         for resource in (self._stream, self._connection, self._server):
             if resource is not None:
                 try:
@@ -256,6 +296,7 @@ class VulkanModelService:
         self._temporary_directory = None
         self._loaded = False
         self._active_device = None
+        self.actual_backend = None
 
     def _ensure_worker(self) -> None:
         if self._process is not None and self._process.poll() is None and self._stream is not None:
@@ -263,7 +304,14 @@ class VulkanModelService:
         self._dispose_worker()
         executable = self._resolve_executable_path()
         if not executable.is_file():
-            raise ModelLoadError(f"找不到 Vulkan worker：{executable}")
+            raise VulkanWorkerError("worker_missing", {"path": str(executable)})
+        if os.name == "nt":
+            import ctypes
+
+            try:
+                ctypes.WinDLL("vulkan-1.dll", winmode=0x00000800)
+            except OSError as error:
+                raise VulkanWorkerError("loader_unavailable", {"exception": repr(error)}) from error
         self._session_id = uuid4().hex
         auth_token = secrets.token_hex(32)
         self._temporary_directory = tempfile.TemporaryDirectory(
@@ -294,17 +342,32 @@ class VulkanModelService:
             startup_info = subprocess.STARTUPINFO()
             startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startup_info.wShowWindow = subprocess.SW_HIDE
-        self._process = subprocess.Popen(
-            [str(executable), "--config", str(config_path)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            startupinfo=startup_info,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
         try:
-            connection, _address = server.accept()
+            self._process = subprocess.Popen(
+                [str(executable), "--config", str(config_path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                shell=False,
+                startupinfo=startup_info,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            assert self._process.stderr is not None
+            self._stderr_thread = threading.Thread(target=self._drain_stderr,
+                                                   args=(self._process.stderr,), daemon=True)
+            self._stderr_thread.start()
+            deadline = time.monotonic() + 15.0
+            server.settimeout(0.2)
+            while True:
+                exit_code = self._process.poll()
+                if exit_code is not None:
+                    raise VulkanWorkerError("worker_startup_failed", {"exit_code": exit_code})
+                try:
+                    connection, _address = server.accept()
+                    break
+                except socket.timeout:
+                    if time.monotonic() >= deadline:
+                        raise VulkanWorkerError("worker_startup_timeout")
             connection.settimeout(30.0)
             self._connection = connection
             self._stream = connection.makefile("rwb", buffering=0)
@@ -316,28 +379,11 @@ class VulkanModelService:
                 and secrets.compare_digest(str(frame.get("auth_token", "")), auth_token)
             ):
                 raise VulkanWorkerError("authentication_failed")
-        except Exception:
-            process = self._process
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-            for resource in (self._stream, self._connection, self._server):
-                if resource is not None:
-                    try:
-                        resource.close()
-                    except OSError:
-                        pass
-            if self._temporary_directory is not None:
-                self._temporary_directory.cleanup()
-            self._process = None
-            self._server = None
-            self._connection = None
-            self._stream = None
-            self._temporary_directory = None
-            raise
+        except Exception as error:
+            self._dispose_worker()
+            if isinstance(error, VulkanWorkerError):
+                raise
+            raise VulkanWorkerError("worker_startup_failed", {"exception": repr(error)}) from error
 
     def _request(self, request_type: str, *, timeout: float, **fields: Any) -> dict[str, Any]:
         with self._request_lock:
@@ -364,6 +410,10 @@ class VulkanModelService:
                         raise TimeoutError(f"Vulkan {request_type} 请求超时")
                     self._connection.settimeout(remaining)
                     frame = self._read_frame()
+                    if frame.get("type") in {"heartbeat", "event"}:
+                        continue
+                    if frame.get("contract_version") != CONTRACT_VERSION or frame.get("session_id") != self._session_id:
+                        raise VulkanWorkerError("protocol_invalid")
                     if frame.get("type") == "response" and frame.get("request_id") == request_id:
                         break
             except (OSError, VulkanWorkerError):
@@ -401,6 +451,8 @@ class VulkanModelService:
 
     def _select_device(self, devices: tuple[VulkanDevice, ...]) -> VulkanDevice:
         if self.device_id == "auto":
+            if not devices:
+                raise VulkanWorkerError("no_devices")
             return devices[0]
         for device in devices:
             if device.device_id == self.device_id:
@@ -413,8 +465,6 @@ class VulkanModelService:
             self._configured_executable,
             Path(configured).expanduser() if configured else None,
             self._application_directory / "bin" / WORKER_FILENAME,
-            Path(r"D:\CODE\prpl\PuriPuly-heart-main\build\gpu_worker")
-            / WORKER_FILENAME,
         ]
         return next((path for path in candidates if path is not None and path.is_file()),
                     self._application_directory / "bin" / WORKER_FILENAME)
@@ -455,8 +505,23 @@ class VulkanModelService:
     @staticmethod
     def _friendly_error(error: BaseException) -> str:
         if isinstance(error, VulkanWorkerError):
+            if error.code.startswith("worker_closed"):
+                return "worker 意外退出，请查看诊断日志"
             return {
-                "unsupported_capability": "未发现可用的 Vulkan 推理设备",
+                "unsupported_capability": "Vulkan 后端不可用，请检查显卡驱动及诊断日志",
+                "backend_unavailable": "Vulkan 后端不可用，请检查显卡驱动及诊断日志",
+                "backend_initialization_failed": "Vulkan 后端初始化失败，请检查显卡驱动及诊断日志",
+                "loader_unavailable": "系统 Vulkan loader 不可用，请检查显卡驱动",
+                "worker_missing": "找不到 Vulkan worker，请检查发行包是否完整",
+                "worker_startup_failed": "worker 启动失败，请查看诊断日志",
+                "worker_startup_timeout": "worker 启动超时，请查看诊断日志",
+                "authentication_failed": "worker 握手认证失败",
+                "protocol_invalid": "worker 协议错误",
+                "device_invalid": "worker 设备数据格式错误",
+                "device_index_missing": "Vulkan 设备缺少索引，请查看诊断日志",
+                "discovery_invalid": "worker 设备列表格式错误",
+                "response_invalid": "worker 响应格式错误",
+                "no_devices": "未发现系统 Vulkan 设备，请检查显卡驱动",
                 "device_unavailable": "所选 Vulkan 设备当前不可用",
                 "model_missing": "GGUF 模型文件不存在",
                 "model_invalid": "GGUF 模型文件无效",
@@ -465,4 +530,4 @@ class VulkanModelService:
                 "out_of_memory": "Vulkan 设备内存不足",
                 "decode_failure": "Vulkan 解码失败",
             }.get(error.code, error.code)
-        return str(error)
+        return "设备检测异常，请查看诊断日志" if not isinstance(error, ModelLoadError) else str(error)

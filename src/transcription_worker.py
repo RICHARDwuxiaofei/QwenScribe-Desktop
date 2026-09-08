@@ -19,6 +19,7 @@ from .exceptions import (
     UserCancelledError,
 )
 from .media_service import MediaService
+from .device_discovery import DiscoveryResult
 from .model_service import ModelService, TranscriptionResult
 from .segmenter import Segment, calculate_segments
 from .utils import (
@@ -131,6 +132,8 @@ class TranscriptionWorker(QObject):
             except Exception:
                 LOGGER.exception("后台枚举 CUDA 设备失败")
 
+        vulkan_result = DiscoveryResult("vulkan", ok=False, error_code="not_included",
+                                        error_message="当前版本未包含此后端")
         discovery_service = None
         if "vulkan" in self._supported_backends:
             try:
@@ -139,16 +142,19 @@ class TranscriptionWorker(QObject):
                 discovery_service = VulkanModelService(
                     self._application_directory, device_id="auto"
                 )
-                vulkan_devices = [
-                    (device.device_id, device.display_label)
-                    for device in discovery_service.discover_devices()
-                ]
-            except Exception:
+                vulkan_result = discovery_service.discover_result()
+            except Exception as error:
                 LOGGER.exception("后台枚举 Vulkan 设备失败")
+                vulkan_result = DiscoveryResult("vulkan", ok=False,
+                    error_code="discovery_exception", error_message="设备检测异常，请查看日志",
+                    details={"exception": repr(error)})
             finally:
                 if discovery_service is not None:
-                    discovery_service.close()
-        self.devices_discovered.emit(cuda_devices, vulkan_devices)
+                    try:
+                        discovery_service.close()
+                    except Exception:
+                        LOGGER.exception("关闭 Vulkan discovery worker 失败")
+        self.devices_discovered.emit(cuda_devices, vulkan_result)
 
     @Slot()
     def shutdown_backend(self) -> None:

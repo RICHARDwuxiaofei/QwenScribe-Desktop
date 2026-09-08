@@ -25,6 +25,39 @@ class _FakeModelService:
         return None
 
 
+def test_frozen_gui_uses_internal_and_preserves_stale_gpu(tmp_path, monkeypatch):
+    import sys
+    from src.device_discovery import DiscoveryResult
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(TranscriptionWorker, "discover_devices", lambda self: None)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "QwenScribeDesktop.exe"))
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "_internal"), raising=False)
+    config = ConfigService(tmp_path / "config.json")
+    config.data["vulkan_device_id"] = "old-device"
+    model = _FakeModelService()
+    model.device_id = "old-device"
+    window = MainWindow(config_service=config, model_service=model, active_backend="vulkan",
+                        supported_backends=frozenset({"vulkan"}))
+    try:
+        assert window._worker._application_directory == tmp_path / "_internal"
+        result = DiscoveryResult("vulkan", (("reported", "Vulkan: Reported GPU"),))
+        window._on_devices_discovered([], result)
+        assert window.device_combo.findData("reported") >= 0
+        assert window.device_combo.findData("auto") >= 0
+        assert "当前不可用" in window.device_combo.itemText(window.device_combo.findData("old-device"))
+        assert "之前配置的设备" in window.log_view.toPlainText()
+        assert config.get("vulkan_device_id") == "old-device"
+        window._on_devices_discovered([], DiscoveryResult("vulkan", ok=False,
+            error_code="worker_startup_failed", error_message="worker 启动失败"))
+        assert "worker 启动失败" in window.gpu_label.text()
+        assert "worker_startup_failed" in window.log_view.toPlainText()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_main_window_switches_between_chinese_and_english(
     tmp_path: Path, monkeypatch: object
 ) -> None:

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO
 
 from src.build_config import (
+    application_directory as resource_directory,
     choose_supported_backend,
     current_build,
     diagnostic,
@@ -20,6 +21,25 @@ from src.build_config import (
 
 
 _NATIVE_CRASH_STREAM: IO[str] | None = None
+
+
+def _prepare_frozen_dll_search_path(application_directory: Path) -> None:
+    """Make nested PySide6 and shiboken6 DLLs loadable on Windows onedir builds."""
+    if os.name != "nt":
+        return
+    candidates = (
+        application_directory,
+        application_directory / "PySide6",
+        application_directory / "shiboken6",
+    )
+    for directory in candidates:
+        if directory.is_dir():
+            try:
+                os.add_dll_directory(str(directory.resolve()))
+            except OSError:
+                # Python versions without AddDllDirectory support still use PATH
+                # from the bootloader; importing Qt should remain the fallback.
+                pass
 
 
 def _enable_native_crash_logging(log_path: Path) -> None:
@@ -37,9 +57,12 @@ def main() -> int:
 
         return worker_main()
 
-    application_directory = Path(
-        getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
-    )
+    application_directory = resource_directory()
+    _prepare_frozen_dll_search_path(application_directory)
+    if "--smoke-test" in sys.argv:
+        from src.runtime_smoke import run
+
+        return run(Path(sys.argv[sys.argv.index("--smoke-test") + 1]))
     check_requested = "--check" in sys.argv or os.environ.get("QWENSCRIBE_RUN_CHECK") == "1"
     if check_requested:
         report = json.dumps(diagnostic(application_directory), ensure_ascii=False, sort_keys=True)
@@ -80,9 +103,7 @@ def main() -> int:
     os.environ.setdefault("QWEN_ASR_PORTABLE_ROOT", str(Path(sys.executable).resolve().parent))
     config = ConfigService()
     capabilities = current_build()
-    backend = str(config.get("inference_backend", "transformers"))
-    if backend not in {"transformers", "vulkan"}:
-        backend = "vulkan" if capabilities.has_vulkan_backend else "transformers"
+    backend = str(config.get("inference_backend")) if "inference_backend" in config.data else None
     requested_backend = backend
     backend, unsupported_backend = choose_supported_backend(backend, capabilities)
     if unsupported_backend:

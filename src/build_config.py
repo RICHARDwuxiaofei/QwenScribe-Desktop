@@ -41,9 +41,16 @@ def current_build() -> BuildCapabilities:
     return BuildCapabilities(variant=variant, backends=backends)
 
 
-def choose_supported_backend(requested: str, capabilities: BuildCapabilities | None = None) -> tuple[str, bool]:
+def application_directory() -> Path:
+    """Resolve bundled resources, not the directory containing the launcher."""
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)).resolve()
+
+
+def choose_supported_backend(requested: str | None, capabilities: BuildCapabilities | None = None) -> tuple[str, bool]:
     """Return the supported operational backend and flag an invalid preference."""
     capabilities = capabilities or current_build()
+    if requested is None:
+        return ("transformers" if capabilities.has_transformers_backend else "vulkan"), False
     if requested in capabilities.backends:
         return requested, False
     # The caller must disclose this before using it.  This does not overwrite

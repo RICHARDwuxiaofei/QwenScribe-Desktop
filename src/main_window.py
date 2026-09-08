@@ -494,11 +494,7 @@ class MainWindow(QMainWindow):
         self.open_output_button.clicked.connect(self._open_output_directory)
 
     def _start_worker_thread(self, model_service: Any | None = None) -> None:
-        application_directory = (
-            Path(sys.executable).resolve().parent
-            if getattr(sys, "frozen", False)
-            else Path(__file__).resolve().parent.parent
-        )
+        from .build_config import application_directory
         self._worker_thread = QThread(self)
         self._worker_thread.setObjectName("PersistentASRWorkerThread")
         # Transformers constructs a deeply nested Qwen module graph.  The
@@ -508,7 +504,7 @@ class MainWindow(QMainWindow):
         # Python exception.
         self._worker_thread.setStackSize(64 * 1024 * 1024)
         self._worker = TranscriptionWorker(
-            application_directory,
+            application_directory(),
             model_service=model_service,
             supported_backends=self._supported_backends,
         )
@@ -1309,16 +1305,26 @@ class MainWindow(QMainWindow):
         cuda_devices: object,
         vulkan_devices: object,
     ) -> None:
+        from .device_discovery import DiscoveryResult
+
         self._cuda_devices = list(cuda_devices)  # type: ignore[arg-type]
-        self._vulkan_devices = list(vulkan_devices)  # type: ignore[arg-type]
+        result = vulkan_devices if isinstance(vulkan_devices, DiscoveryResult) else DiscoveryResult(
+            "vulkan", tuple(vulkan_devices))
+        self._vulkan_devices = list(result.devices)
         self._device_discovery_complete = True
         backend = str(self.backend_combo.currentData() or "transformers")
         selected = str(self.device_combo.currentData() or self._active_device_id)
         self._populate_device_combo(backend, selected)
-        self._append_log(
-            f"设备检测完成：CUDA {len(self._cuda_devices)} 个，"
-            f"Vulkan {len(self._vulkan_devices)} 个。"
-        )
+        self._append_log(f"设备检测完成：CUDA {len(self._cuda_devices)} 个；{result.summary}。")
+        if backend == "vulkan":
+            self.gpu_label.setText(result.summary)
+            self.gpu_label.setToolTip(result.summary)
+            if not result.ok or not result.devices:
+                self.status_label.setText(result.summary)
+        if selected not in {"", "auto"} and selected not in dict(
+            self._vulkan_devices if backend == "vulkan" else self._cuda_devices
+        ):
+            self._append_log(f"之前配置的设备 {selected} 当前不可用，请选择可用设备。")
         self._refresh_start_button()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
