@@ -206,8 +206,12 @@ jobs:
         run: |
           $check = Get-Content (Join-Path $env:RUNNER_TEMP "$env:SKU-check.json") -Raw | ConvertFrom-Json
           if (-not $check.vulkan_worker) { throw "Vulkan worker was not reported." }
-          & $check.vulkan_worker --check-startup-contract
-          if ($LASTEXITCODE -ne 0) { throw "Vulkan worker startup contract failed with exit code $LASTEXITCODE" }
+          $startupStdout = Join-Path $env:RUNNER_TEMP "$env:SKU-worker-startup.stdout.log"
+          $startupStderr = Join-Path $env:RUNNER_TEMP "$env:SKU-worker-startup.stderr.log"
+          Remove-Item -LiteralPath $startupStdout,$startupStderr -Force -ErrorAction SilentlyContinue
+          $startupProcess = Start-Process -FilePath ([string]$check.vulkan_worker) -ArgumentList @('--check-startup-contract') -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $startupStdout -RedirectStandardError $startupStderr -Wait -PassThru -WindowStyle Hidden
+          if ($startupProcess.ExitCode -ne 0) { throw "Vulkan worker startup contract failed with exit code $($startupProcess.ExitCode)" }
+          Get-Content -LiteralPath $startupStdout
           $stdout = Join-Path $env:RUNNER_TEMP "$env:SKU-vulkan-diagnostic.json"
           $stderr = Join-Path $env:RUNNER_TEMP "$env:SKU-vulkan-diagnostic.stderr.log"
           Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue
@@ -262,6 +266,8 @@ jobs:
             ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.stderr.log
             ${{ runner.temp }}/${{ matrix.sku }}-vulkan-diagnostic.json
             ${{ runner.temp }}/${{ matrix.sku }}-vulkan-diagnostic.stderr.log
+            ${{ runner.temp }}/${{ matrix.sku }}-worker-startup.stdout.log
+            ${{ runner.temp }}/${{ matrix.sku }}-worker-startup.stderr.log
             ${{ runner.temp }}/QwenASRDesktop-native-crash.log
           if-no-files-found: warn
           retention-days: 14
