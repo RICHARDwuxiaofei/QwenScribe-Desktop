@@ -19,6 +19,7 @@ from .exceptions import (
     UserCancelledError,
 )
 from .media_service import MediaService
+from .device_discovery import DiscoveryResult
 from .model_service import ModelService, TranscriptionResult
 from .segmenter import Segment, calculate_segments
 from .utils import (
@@ -60,10 +61,12 @@ class TranscriptionWorker(QObject):
         self,
         application_directory: Path,
         model_service: Any | None = None,
+        supported_backends: frozenset[str] | None = None,
     ) -> None:
         super().__init__()
         self._application_directory = Path(application_directory)
         self._model_service = model_service or ModelService()
+        self._supported_backends = supported_backends or frozenset({"transformers", "vulkan"})
         self._media_service: MediaService | None = None
         self._cancel_event = threading.Event()
         self._busy_lock = threading.Lock()
@@ -112,39 +115,46 @@ class TranscriptionWorker(QObject):
         """Enumerate every CUDA/Vulkan device without blocking the Qt GUI."""
         cuda_devices: list[tuple[str, str]] = []
         vulkan_devices: list[tuple[str, str]] = []
-        try:
-            import torch
+        if "transformers" in self._supported_backends:
+            try:
+                import torch
 
-            if torch.cuda.is_available():
-                for index in range(torch.cuda.device_count()):
-                    properties = torch.cuda.get_device_properties(index)
-                    total_gib = float(properties.total_memory) / (1024.0**3)
-                    cuda_devices.append(
-                        (
-                            f"cuda:{index}",
-                            f"CUDA cuda:{index}：{properties.name}（{total_gib:.1f} GB）",
+                if torch.cuda.is_available():
+                    for index in range(torch.cuda.device_count()):
+                        properties = torch.cuda.get_device_properties(index)
+                        total_gib = float(properties.total_memory) / (1024.0**3)
+                        cuda_devices.append(
+                            (
+                                f"cuda:{index}",
+                                f"CUDA cuda:{index}：{properties.name}（{total_gib:.1f} GB）",
+                            )
                         )
-                    )
-        except Exception:
-            LOGGER.exception("后台枚举 CUDA 设备失败")
+            except Exception:
+                LOGGER.exception("后台枚举 CUDA 设备失败")
 
+        vulkan_result = DiscoveryResult("vulkan", ok=False, error_code="not_included",
+                                        error_message="当前版本未包含此后端")
         discovery_service = None
-        try:
-            from .vulkan_model_service import VulkanModelService
+        if "vulkan" in self._supported_backends:
+            try:
+                from .vulkan_model_service import VulkanModelService
 
-            discovery_service = VulkanModelService(
-                self._application_directory, device_id="auto"
-            )
-            vulkan_devices = [
-                (device.device_id, device.display_label)
-                for device in discovery_service.discover_devices()
-            ]
-        except Exception:
-            LOGGER.exception("后台枚举 Vulkan 设备失败")
-        finally:
-            if discovery_service is not None:
-                discovery_service.close()
-        self.devices_discovered.emit(cuda_devices, vulkan_devices)
+                discovery_service = VulkanModelService(
+                    self._application_directory, device_id="auto"
+                )
+                vulkan_result = discovery_service.discover_result()
+            except Exception as error:
+                LOGGER.exception("后台枚举 Vulkan 设备失败")
+                vulkan_result = DiscoveryResult("vulkan", ok=False,
+                    error_code="discovery_exception", error_message="设备检测异常，请查看日志",
+                    details={"exception": repr(error)})
+            finally:
+                if discovery_service is not None:
+                    try:
+                        discovery_service.close()
+                    except Exception:
+                        LOGGER.exception("关闭 Vulkan discovery worker 失败")
+        self.devices_discovered.emit(cuda_devices, vulkan_result)
 
     @Slot()
     def shutdown_backend(self) -> None:
@@ -162,10 +172,12 @@ class TranscriptionWorker(QObject):
             self._task_pending = False
             cancelled_before_start = self._pending_cancel
             self._pending_cancel = False
-        if cancelled_before_start:
-            self._cancel_event.set()
-        else:
-            self._cancel_event.clear()
+            # Publish busy state and reset the event atomically with respect to
+            # request_cancel; clearing it after unlocking loses a new cancellation.
+            if cancelled_before_start:
+                self._cancel_event.set()
+            else:
+                self._cancel_event.clear()
         self.task_started.emit()
         self.progress_changed.emit(0)
 
@@ -173,6 +185,8 @@ class TranscriptionWorker(QObject):
         final_path: Path | None = None
         reservation_path: Path | None = None
         completed_successfully = False
+        terminal_signal = None
+        terminal_args: tuple[str, ...] = ()
         try:
             self._check_cancelled()
             self._media_service = self._media_service or MediaService(
@@ -191,6 +205,7 @@ class TranscriptionWorker(QObject):
             self._partial_handle = None
             self._set_status("正在保存文本")
             self.progress_changed.emit(98)
+            self._check_cancelled()
             if final_path.exists():
                 raise TranscriptionError(
                     f"输出文件在转写期间被其他程序创建，已保留部分结果：{partial_path}"
@@ -200,7 +215,8 @@ class TranscriptionWorker(QObject):
             self.progress_changed.emit(100)
             self._set_status("已完成")
             self.user_log.emit(f"转写完成：{final_path}")
-            self.task_completed.emit(str(final_path))
+            terminal_signal = self.task_completed
+            terminal_args = (str(final_path),)
         except UserCancelledError:
             self._set_status("已取消")
             retained = str(partial_path) if partial_path and partial_path.exists() else ""
@@ -208,7 +224,8 @@ class TranscriptionWorker(QObject):
                 self.user_log.emit(f"已取消，已识别内容保存在：{retained}")
             else:
                 self.user_log.emit("已取消，尚未生成部分文本")
-            self.task_cancelled.emit(retained)
+            terminal_signal = self.task_cancelled
+            terminal_args = (retained,)
         except Exception as error:
             LOGGER.error("转写任务失败\n%s", traceback.format_exc())
             self._set_status("发生错误")
@@ -217,7 +234,8 @@ class TranscriptionWorker(QObject):
             if retained:
                 summary = f"{summary}\n已保留部分结果：{retained}"
             self.user_log.emit(summary)
-            self.task_failed.emit(summary, retained)
+            terminal_signal = self.task_failed
+            terminal_args = (summary, retained)
         finally:
             self._partial_handle = None
             if reservation_path is not None:
@@ -239,6 +257,10 @@ class TranscriptionWorker(QObject):
                 self._busy = False
                 self._task_pending = False
                 self._pending_cancel = False
+        # The GUI may enqueue (and cancel) the next task as soon as it receives
+        # this signal. Do not clear its pending state during the previous cleanup.
+        if terminal_signal is not None:
+            terminal_signal.emit(*terminal_args)
 
     def _execute_task(self, task: TranscriptionTask) -> None:
         assert self._media_service is not None

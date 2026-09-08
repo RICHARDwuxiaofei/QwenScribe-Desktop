@@ -53,7 +53,11 @@ class ModelService:
 
     @property
     def is_loaded(self) -> bool:
-        return self._loaded if self._use_subprocess else self._model is not None
+        if self._use_subprocess:
+            if self._process is None or self._process.poll() is not None:
+                self._loaded = False
+            return self._loaded
+        return self._model is not None
 
     @property
     def chunk_suffix(self) -> str:
@@ -92,6 +96,8 @@ class ModelService:
             return
         if self._use_subprocess:
             try:
+                if not self.model_available:
+                    raise ModelLoadError("尚未安装 Qwen3-ASR-1.7B Transformers 模型")
                 response = self._request(
                     "load",
                     model_source=self.model_source,
@@ -153,7 +159,7 @@ class ModelService:
 
     def transcribe(self, audio_path: Path, language: str | None) -> TranscriptionResult:
         if self._use_subprocess:
-            if not self._loaded:
+            if not self.is_loaded:
                 raise TranscriptionError("模型尚未加载")
             try:
                 response = self._request(

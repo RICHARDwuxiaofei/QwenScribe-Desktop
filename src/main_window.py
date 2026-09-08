@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from .config_service import ConfigService
+from .build_config import current_build
 from .i18n import (
     STATIC_EN,
     UI_LANGUAGES,
@@ -224,6 +225,8 @@ class MainWindow(QMainWindow):
         active_backend: str = "transformers",
         cuda_devices: list[tuple[str, str]] | None = None,
         vulkan_devices: list[tuple[str, str]] | None = None,
+        supported_backends: frozenset[str] | None = None,
+        unsupported_backend_message: str | None = None,
     ) -> None:
         super().__init__()
         self.setAcceptDrops(True)
@@ -237,6 +240,8 @@ class MainWindow(QMainWindow):
         self._task_active = False
         self._backend_available = False
         self._active_backend = active_backend
+        self._supported_backends = supported_backends or current_build().backends
+        self._unsupported_backend_message = unsupported_backend_message
         self._cuda_devices = list(cuda_devices or [])
         self._vulkan_devices = list(vulkan_devices or [])
         self._device_discovery_complete = bool(cuda_devices or vulkan_devices)
@@ -264,6 +269,8 @@ class MainWindow(QMainWindow):
         self._restore_settings()
         self._connect_ui()
         self._start_worker_thread(model_service)
+        if self._unsupported_backend_message:
+            QTimer.singleShot(0, self._show_unsupported_backend_message)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -359,13 +366,17 @@ class MainWindow(QMainWindow):
         compute_row = QHBoxLayout()
         compute_row.addWidget(QLabel("推理方式"))
         self.backend_combo = QComboBox()
-        self.backend_combo.addItem("官方 Transformers（PyTorch CUDA）", "transformers")
-        self.backend_combo.addItem("transcribe.cpp（Vulkan GGUF）", "vulkan")
+        if "transformers" in self._supported_backends:
+            self.backend_combo.addItem("官方 Transformers（PyTorch CUDA）", "transformers")
+        if "vulkan" in self._supported_backends:
+            self.backend_combo.addItem("transcribe.cpp（Vulkan GGUF）", "vulkan")
         compute_row.addWidget(self.backend_combo, 2)
         compute_row.addWidget(QLabel("模型"))
         self.model_combo = QComboBox()
-        self.model_combo.addItem("Qwen3-ASR-1.7B 官方 BF16/FP16", "transformers")
-        self.model_combo.addItem("Qwen3-ASR-1.7B Q6_K GGUF", "vulkan")
+        if "transformers" in self._supported_backends:
+            self.model_combo.addItem("Qwen3-ASR-1.7B 官方 BF16/FP16", "transformers")
+        if "vulkan" in self._supported_backends:
+            self.model_combo.addItem("Qwen3-ASR-1.7B Q6_K GGUF", "vulkan")
         compute_row.addWidget(self.model_combo, 2)
         compute_row.addWidget(QLabel("GPU"))
         self.device_combo = QComboBox()
@@ -483,11 +494,7 @@ class MainWindow(QMainWindow):
         self.open_output_button.clicked.connect(self._open_output_directory)
 
     def _start_worker_thread(self, model_service: Any | None = None) -> None:
-        application_directory = (
-            Path(sys.executable).resolve().parent
-            if getattr(sys, "frozen", False)
-            else Path(__file__).resolve().parent.parent
-        )
+        from .build_config import application_directory
         self._worker_thread = QThread(self)
         self._worker_thread.setObjectName("PersistentASRWorkerThread")
         # Transformers constructs a deeply nested Qwen module graph.  The
@@ -496,7 +503,11 @@ class MainWindow(QMainWindow):
         # can terminate python312.dll with 0xC0000005 instead of raising a
         # Python exception.
         self._worker_thread.setStackSize(64 * 1024 * 1024)
-        self._worker = TranscriptionWorker(application_directory, model_service=model_service)
+        self._worker = TranscriptionWorker(
+            application_directory(),
+            model_service=model_service,
+            supported_backends=self._supported_backends,
+        )
         self._worker.moveToThread(self._worker_thread)
         self.start_requested.connect(self._worker.start_task)
         self.gpu_probe_requested.connect(self._worker.detect_gpu)
@@ -799,6 +810,14 @@ class MainWindow(QMainWindow):
         self._populate_device_combo(backend, selected)
         self._config.set("inference_backend", backend)
         self._mark_backend_restart_if_needed()
+
+    def _show_unsupported_backend_message(self) -> None:
+        message = self._unsupported_backend_message
+        if not message:
+            return
+        self.status_label.setText(message)
+        self._append_log(message)
+        QMessageBox.warning(self, self._t("后端不可用", "Backend unavailable"), message)
 
     def _on_model_changed(self, _index: int) -> None:
         backend = str(self.model_combo.currentData() or "transformers")
@@ -1235,12 +1254,33 @@ class MainWindow(QMainWindow):
         self._refresh_start_button()
 
     def _refresh_start_button(self) -> None:
+        restart_required = (
+            str(self.backend_combo.currentData() or "") != self._active_backend
+            or str(self.device_combo.currentData() or "") != self._active_device_id
+        )
+        restart_hint = self._t(
+            "推理方式或 GPU 已更改，请重启程序后生效",
+            "Backend or GPU changed; restart the app to apply it",
+        )
+        self.start_button.setText(
+            self._t("请重启后开始", "Restart to start")
+            if restart_required
+            else self._t("开始转写队列", "Start transcription queue")
+        )
+        self.start_button.setToolTip(restart_hint if restart_required else "")
+        if restart_required and not self._task_active:
+            # Keep the requirement visible after importing files or switching UI language.
+            self.status_label.setText(restart_hint)
+        elif not self._task_active and self.status_label.text() in {
+            "推理方式或 GPU 已更改，请重启程序后生效",
+            "Backend or GPU changed; restart the app to apply it",
+        }:
+            self.status_label.setText(self._t("就绪", "Ready"))
         self.start_button.setEnabled(
             bool(
                 not self._task_active
                 and self._backend_available
-                and str(self.backend_combo.currentData() or "") == self._active_backend
-                and str(self.device_combo.currentData() or "") == self._active_device_id
+                and not restart_required
                 and self._queue.entries
                 and self.output_edit.text().strip()
             )
@@ -1265,16 +1305,26 @@ class MainWindow(QMainWindow):
         cuda_devices: object,
         vulkan_devices: object,
     ) -> None:
+        from .device_discovery import DiscoveryResult
+
         self._cuda_devices = list(cuda_devices)  # type: ignore[arg-type]
-        self._vulkan_devices = list(vulkan_devices)  # type: ignore[arg-type]
+        result = vulkan_devices if isinstance(vulkan_devices, DiscoveryResult) else DiscoveryResult(
+            "vulkan", tuple(vulkan_devices))
+        self._vulkan_devices = list(result.devices)
         self._device_discovery_complete = True
         backend = str(self.backend_combo.currentData() or "transformers")
         selected = str(self.device_combo.currentData() or self._active_device_id)
         self._populate_device_combo(backend, selected)
-        self._append_log(
-            f"设备检测完成：CUDA {len(self._cuda_devices)} 个，"
-            f"Vulkan {len(self._vulkan_devices)} 个。"
-        )
+        self._append_log(f"设备检测完成：CUDA {len(self._cuda_devices)} 个；{result.summary}。")
+        if backend == "vulkan":
+            self.gpu_label.setText(result.summary)
+            self.gpu_label.setToolTip(result.summary)
+            if not result.ok or not result.devices:
+                self.status_label.setText(result.summary)
+        if selected not in {"", "auto"} and selected not in dict(
+            self._vulkan_devices if backend == "vulkan" else self._cuda_devices
+        ):
+            self._append_log(f"之前配置的设备 {selected} 当前不可用，请选择可用设备。")
         self._refresh_start_button()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802

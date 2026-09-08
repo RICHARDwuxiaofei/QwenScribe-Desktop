@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,3 +55,27 @@ def test_vulkan_oom_is_detected_without_importing_torch(tmp_path: Path) -> None:
     service = VulkanModelService(tmp_path, device_id="vulkan-index-1")
     assert service.is_out_of_memory(VulkanWorkerError("out_of_memory"))
     assert not service.is_out_of_memory(VulkanWorkerError("decode_failure"))
+
+
+@pytest.mark.parametrize("language,expected", [
+    (None, None), ("English", "en"), ("Chinese", "zh"),
+    ("Cantonese", "yue"), ("Filipino", "fil"), ("en", "en"),
+])
+def test_vulkan_sends_language_codes_to_worker(tmp_path, monkeypatch, language, expected):
+    service = VulkanModelService(tmp_path, device_id="auto")
+    service._process = SimpleNamespace(poll=lambda: None)
+    service._loaded = True
+    calls = []
+
+    def request(kind, **fields):
+        calls.append(fields)
+        return {"transcription": {"text": "test", "detected_language": "en"}}
+
+    monkeypatch.setattr(service, "_request", request)
+    assert service.transcribe(tmp_path / "chunk.wav", language).text == "test"
+    assert calls[0]["language_hint"] == expected
+
+
+def test_vulkan_language_map_covers_every_manual_ui_language():
+    from src.language_map import LANGUAGE_MAP, VULKAN_LANGUAGE_CODES
+    assert set(VULKAN_LANGUAGE_CODES) == set(LANGUAGE_MAP.values()) - {None}

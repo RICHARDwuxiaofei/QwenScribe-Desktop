@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -97,7 +98,7 @@ class MediaService:
             if duration_value is None:
                 duration_value = audio_streams[0].get("duration")
             duration = float(duration_value)
-            if duration <= 0:
+            if not math.isfinite(duration) or duration <= 0:
                 raise ValueError("non-positive duration")
         except NoAudioStreamError:
             raise
@@ -238,6 +239,8 @@ class MediaService:
         cancel_event: threading.Event,
         error_prefix: str,
     ) -> str:
+        if cancel_event.is_set():
+            raise UserCancelledError("用户已取消")
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -251,6 +254,8 @@ class MediaService:
         )
         self._set_process(process)
         try:
+            if cancel_event.is_set():
+                raise UserCancelledError("用户已取消")
             while True:
                 try:
                     output, _ = process.communicate(timeout=0.2)
@@ -278,6 +283,8 @@ class MediaService:
         *,
         collected_lines: list[str] | None = None,
     ) -> None:
+        if cancel_event.is_set():
+            raise UserCancelledError("用户已取消")
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -293,6 +300,8 @@ class MediaService:
         self._set_process(process)
         tail: list[str] = []
         try:
+            if cancel_event.is_set():
+                raise UserCancelledError("用户已取消")
             assert process.stdout is not None
             for raw_line in process.stdout:
                 line = raw_line.strip()
@@ -324,9 +333,14 @@ class MediaService:
             self._process = process
 
     def _clear_process(self, process: subprocess.Popen[str]) -> None:
-        with self._process_lock:
-            if self._process is process:
-                self._process = None
+        try:
+            self._terminate_and_wait(process)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            with self._process_lock:
+                if self._process is process:
+                    self._process = None
 
     @staticmethod
     def _terminate_and_wait(process: subprocess.Popen[str]) -> None:

@@ -1,0 +1,2 @@
+# Vulkan/GGUF desktop SKU: the native worker is bundled separately.
+-r requirements-common.txt

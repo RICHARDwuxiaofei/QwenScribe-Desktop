@@ -1,8 +1,10 @@
-name: Windows onedir build
+name: Windows SKU builds
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - "**"
     tags:
       - "v*"
 
@@ -15,12 +17,27 @@ env:
   PYTORCH_VERSION: "2.11.0+cu128"
   VULKAN_SDK_VERSION: "1.4.350.0"
   VULKAN_SDK_SHA256: "855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b"
-  PURIPULY_COMMIT: "6f83741c7e68d9d13b2efa306d3427df447d576b"
+  PURIPULY_COMMIT: "e28dba7197e68db9e51e7c5ffda358da88fd46c7"
 
 jobs:
   build:
+    name: ${{ matrix.name }}
     runs-on: windows-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: vulkan
+            name: Vulkan GGUF SKU
+            sku: QwenScribe-Vulkan-Windows-x64
+            requirements: requirements-vulkan.txt
+            build_worker: true
+          - variant: cuda
+            name: CUDA Transformers SKU
+            sku: QwenScribe-CUDA-Windows-x64
+            requirements: requirements-cuda.txt
+            build_worker: false
 
     steps:
       - name: Checkout application source
@@ -35,10 +52,22 @@ jobs:
       - name: Install Python build dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "torch==$env:PYTORCH_VERSION" --index-url $env:PYTORCH_INDEX_URL
-          python -m pip install -r requirements-dev.txt
-          python -m pip install "libclang==18.1.1"
+          python -m venv .build-venv
+          $python = (Resolve-Path .build-venv\Scripts\python.exe).Path
+          & $python -m pip install --upgrade pip
+          & $python -m pip install -r requirements-dev.txt
+          if ('${{ matrix.variant }}' -eq 'cuda') {
+            & $python -m pip install "torch==$env:PYTORCH_VERSION" --index-url $env:PYTORCH_INDEX_URL
+          }
+          & $python -m pip install -r '${{ matrix.requirements }}'
+          if ('${{ matrix.variant }}' -eq 'vulkan') {
+            $forbidden = foreach ($packageName in @('torch', 'torchgen', 'transformers', 'qwen_asr')) {
+              $found = & $python -c "import importlib.util; print('present' if importlib.util.find_spec('$packageName') else '')"
+              if ($found -eq 'present') { $packageName }
+            }
+            if ($forbidden) { throw "Vulkan environment unexpectedly installed: $($forbidden -join ', ')" }
+          }
+          (Resolve-Path .build-venv\Scripts).Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Run tests
         shell: pwsh
@@ -49,129 +78,269 @@ jobs:
         run: |
           choco install ffmpeg -y --no-progress
           $ffmpegTools = Join-Path $env:ChocolateyInstall "lib\ffmpeg\tools"
-          $ffmpeg = Get-ChildItem -LiteralPath $ffmpegTools -Recurse -File -Filter ffmpeg.exe |
-            Select-Object -First 1 -ExpandProperty FullName
-          $ffprobe = Get-ChildItem -LiteralPath $ffmpegTools -Recurse -File -Filter ffprobe.exe |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $ffmpeg -or -not $ffprobe) {
-            throw "Chocolatey installed ffmpeg, but the real runtime binaries were not found."
-          }
+          $ffmpeg = Get-ChildItem -LiteralPath $ffmpegTools -Recurse -File -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty FullName
+          $ffprobe = Get-ChildItem -LiteralPath $ffmpegTools -Recurse -File -Filter ffprobe.exe | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ffmpeg -or -not $ffprobe) { throw "Chocolatey FFmpeg runtime binaries were not found." }
           New-Item -ItemType Directory -Force -Path bin | Out-Null
           Copy-Item -LiteralPath $ffmpeg -Destination bin/ffmpeg.exe -Force
           Copy-Item -LiteralPath $ffprobe -Destination bin/ffprobe.exe -Force
           & bin/ffmpeg.exe -version
+          & bin/ffprobe.exe -version
 
-      - name: Set up Rust
+      - name: Set up Rust and Vulkan SDK
+        if: matrix.build_worker
         uses: dtolnay/rust-toolchain@stable
 
       - name: Download pinned Vulkan SDK
+        if: matrix.build_worker
         shell: pwsh
         run: |
           $installer = Join-Path $env:RUNNER_TEMP "vulkan-sdk.exe"
           $sdkRoot = Join-Path $env:RUNNER_TEMP "VulkanSDK-$env:VULKAN_SDK_VERSION"
-          Invoke-WebRequest `
-            -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true" `
-            -OutFile $installer
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true" -OutFile $installer
           $actual = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $env:VULKAN_SDK_SHA256) {
-            throw "Vulkan SDK checksum mismatch: $actual"
-          }
-          $process = Start-Process `
-            -FilePath $installer `
-            -ArgumentList @(
-              "--root", $sdkRoot,
-              "--accept-licenses",
-              "--default-answer",
-              "--confirm-command", "install",
-              "copy_only=1"
-            ) `
-            -Wait `
-            -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "Vulkan SDK installer failed with exit code $($process.ExitCode)"
-          }
+          if ($actual -ne $env:VULKAN_SDK_SHA256) { throw "Vulkan SDK checksum mismatch: $actual" }
+          $process = Start-Process -FilePath $installer -ArgumentList @("--root", $sdkRoot, "--accept-licenses", "--default-answer", "--confirm-command", "install", "copy_only=1") -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer failed with exit code $($process.ExitCode)" }
           "VULKAN_SDK=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "$sdkRoot\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Fetch and build pinned Vulkan worker
+      - name: Build pinned Vulkan worker
+        if: matrix.build_worker
         shell: pwsh
         run: |
+          python -m pip install "libclang==18.1.1"
           $source = Join-Path $env:RUNNER_TEMP "PuriPuly-heart"
-          git clone --filter=blob:none --no-checkout `
-            https://github.com/RICHARDwuxiaofei/PuriPuly-heart.git $source
+          git clone --filter=blob:none --no-checkout https://github.com/RICHARDwuxiaofei/PuriPuly-heart.git $source
           git -C $source sparse-checkout init --cone
           git -C $source sparse-checkout set native/gpu_worker
           git -C $source checkout $env:PURIPULY_COMMIT
           $clangPath = python -c "import pathlib, clang; print(pathlib.Path(clang.__file__).parent / 'native')"
           $env:LIBCLANG_PATH = $clangPath.Trim()
           $env:CMAKE_PREFIX_PATH = $env:VULKAN_SDK
-          cargo build `
-            --manifest-path "$source/native/gpu_worker/Cargo.toml" `
-            --locked `
-            --release `
-            --bin PuriPulyHeartGpuWorker `
-            --target-dir build/gpu-worker
-          Copy-Item `
-            -LiteralPath build/gpu-worker/release/PuriPulyHeartGpuWorker.exe `
-            -Destination bin/PuriPulyHeartGpuWorker.exe `
-            -Force
-          Copy-Item `
-            -LiteralPath "$source/LICENSE" `
-            -Destination bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt `
-            -Force
+          $env:CFLAGS = '/utf-8'
+          $env:CXXFLAGS = '/utf-8'
+          cargo fmt --manifest-path "$source/native/gpu_worker/Cargo.toml" -- --check
+          if ($LASTEXITCODE -ne 0) { throw "Worker formatting failed" }
+          cargo test --manifest-path "$source/native/gpu_worker/Cargo.toml" --locked --target-dir build/gpu-worker
+          if ($LASTEXITCODE -ne 0) { throw "Worker tests failed" }
+          cargo clippy --manifest-path "$source/native/gpu_worker/Cargo.toml" --locked --all-targets --target-dir build/gpu-worker -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "Worker clippy failed" }
+          cargo build --manifest-path "$source/native/gpu_worker/Cargo.toml" --locked --release --bin PuriPulyHeartGpuWorker --target-dir build/gpu-worker
+          if ($LASTEXITCODE -ne 0) { throw "Worker release build failed" }
+          Copy-Item -LiteralPath build/gpu-worker/release/PuriPulyHeartGpuWorker.exe -Destination bin/PuriPulyHeartGpuWorker.exe -Force
+          Copy-Item -LiteralPath "$source/LICENSE" -Destination bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt -Force
           & bin/PuriPulyHeartGpuWorker.exe --check-startup-contract
 
-      - name: Build PyInstaller onedir application
+      - name: Build PyInstaller SKU
         shell: pwsh
+        env:
+          QWENSCRIBE_BUILD_VARIANT: ${{ matrix.variant }}
         run: python -m PyInstaller --clean --noconfirm QwenASRDesktop.spec
 
-      - name: Stage documentation and verify model exclusion
+      - name: Stage SKU documentation
         shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+          VARIANT: ${{ matrix.variant }}
         run: |
-          Copy-Item README.md dist/QwenScribeDesktop/README.md
-          Copy-Item 使用说明.md dist/QwenScribeDesktop/使用说明.md
-          Copy-Item THIRD_PARTY_NOTICES.md dist/QwenScribeDesktop/THIRD_PARTY_NOTICES.md
-          Copy-Item `
-            bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt `
-            dist/QwenScribeDesktop/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt
-          $forbidden = Get-ChildItem dist/QwenScribeDesktop -Recurse -File | Where-Object {
-            $_.Extension -in @(".gguf", ".safetensors") -or $_.Name -like "*.part"
+          $package = "dist\$env:SKU"
+          Copy-Item README.md "$package\README.md"
+          Copy-Item 使用说明.md "$package\使用说明.md"
+          Copy-Item THIRD_PARTY_NOTICES.md "$package\THIRD_PARTY_NOTICES.md"
+          if ($env:VARIANT -eq 'vulkan') {
+            Copy-Item bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt "$package\LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt"
           }
-          if ($forbidden) {
-            $forbidden | ForEach-Object { Write-Error "Model leaked into build: $($_.FullName)" }
-            throw "Packaged output contains model weights."
+
+      - name: Check packaged SKU boundary
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $package = Join-Path $PWD "dist\$env:SKU"
+          $exe = Join-Path $package "QwenScribeDesktop.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Packaged executable is missing: $exe" }
+          $check = Join-Path $env:RUNNER_TEMP "$env:SKU-check.json"
+          $env:QWENSCRIBE_RUN_CHECK = '1'
+          $env:QWENSCRIBE_CHECK_OUTPUT = $check
+          $process = Start-Process -FilePath $exe -WorkingDirectory $env:RUNNER_TEMP -Wait -PassThru -WindowStyle Hidden
+          Remove-Item Env:QWENSCRIBE_RUN_CHECK
+          Remove-Item Env:QWENSCRIBE_CHECK_OUTPUT
+          if ($process.ExitCode -ne 0) { throw "--check failed with exit code $($process.ExitCode)" }
+          $report = Get-Content -LiteralPath $check -Raw | ConvertFrom-Json
+          if ($report.build_variant -ne $env:VARIANT -or -not $report.frozen -or $report.references_development_directory) {
+            throw "Packaged --check reported an invalid runtime boundary."
           }
-          & 7z a -t7z -mx=3 -mmt=on -v1800m `
-            dist/QwenScribe-Desktop-Windows-x64.7z `
-            dist/QwenScribeDesktop
-          if ($LASTEXITCODE -ne 0) { throw "7-Zip split archive failed." }
-          $assets = Get-ChildItem dist -File | Where-Object {
-            $_.Name -like "QwenScribe-Desktop-Windows-x64.7z.*"
+          if (-not $report.ffmpeg -or -not $report.ffprobe) { throw "Bundled FFmpeg/FFprobe was not reported." }
+          & $report.ffmpeg -version
+          & $report.ffprobe -version
+          $sample = Join-Path $env:RUNNER_TEMP "qwen-scribe-smoke.wav"
+          & $report.ffmpeg -y -f lavfi -i "sine=frequency=1000:duration=2" -ac 1 -ar 16000 $sample
+          & $report.ffprobe -v error -show_entries format=duration -of default=nw=1 $sample
+          & $report.ffmpeg -nostdin -i $sample -af "silencedetect=noise=-35dB:d=0.1" -f null -
+          python scripts/check_vulkan_package.py $package
+          if ($LASTEXITCODE -ne 0) { throw "Bundled system Vulkan components" }
+          $files = @(Get-ChildItem -LiteralPath $package -Recurse -File)
+          $files | ForEach-Object {
+            [ordered]@{ path = $_.FullName.Substring((Resolve-Path $package).Path.Length).TrimStart('\'); bytes = $_.Length }
+          } | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $env:RUNNER_TEMP "$env:SKU-package-files.json") -Encoding utf8
+          $forbidden = $files | Where-Object {
+            $_.Extension -in @('.gguf', '.safetensors', '.part') -or $_.FullName -match '\\.venv\\|\\.pytest_cache\\|\\(pip|wheel)[-_]?cache\\|\\Logs?\\'
           }
-          if (-not $assets) { throw "No release archive was generated." }
-          $hashLines = foreach ($asset in $assets) {
-            $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash *$($asset.Name)"
+          if ($forbidden) { throw "Forbidden content in package: $($forbidden.FullName -join '; ')" }
+          if ($env:VARIANT -eq 'vulkan') {
+            $unexpected = $files | Where-Object { $_.FullName -match '(?i)\\(torch|torchgen|transformers|qwen_asr|accelerate)\\|cudnn|cublas|cudart|torch_cuda|torch_cpu' }
+            if ($unexpected) { throw "Vulkan package contains CUDA/Transformers content: $($unexpected.FullName -join '; ')" }
+            if (-not $report.vulkan_worker) { throw "Vulkan worker was not reported." }
+          } else {
+            $worker = $files | Where-Object { $_.Name -eq 'PuriPulyHeartGpuWorker.exe' }
+            if ($worker) { throw "CUDA package must not contain the Vulkan worker." }
           }
-          $hashLines | Set-Content `
-            dist/QwenScribe-Desktop-Windows-x64.sha256.txt `
-            -Encoding ascii
+
+      - name: Validate Vulkan worker and native diagnostic
+        if: matrix.build_worker
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+        run: |
+          $check = Get-Content (Join-Path $env:RUNNER_TEMP "$env:SKU-check.json") -Raw | ConvertFrom-Json
+          if (-not $check.vulkan_worker) { throw "Vulkan worker was not reported." }
+          $startupStdout = Join-Path $env:RUNNER_TEMP "$env:SKU-worker-startup.stdout.log"
+          $startupStderr = Join-Path $env:RUNNER_TEMP "$env:SKU-worker-startup.stderr.log"
+          Remove-Item -LiteralPath $startupStdout,$startupStderr -Force -ErrorAction SilentlyContinue
+          $startupProcess = Start-Process -FilePath ([string]$check.vulkan_worker) -ArgumentList @('--check-startup-contract') -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $startupStdout -RedirectStandardError $startupStderr -Wait -PassThru -WindowStyle Hidden
+          if ($startupProcess.ExitCode -ne 0) { throw "Vulkan worker startup contract failed with exit code $($startupProcess.ExitCode)" }
+          Get-Content -LiteralPath $startupStdout
+          $stdout = Join-Path $env:RUNNER_TEMP "$env:SKU-vulkan-diagnostic.json"
+          $stderr = Join-Path $env:RUNNER_TEMP "$env:SKU-vulkan-diagnostic.stderr.log"
+          Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue
+          $nativeProcess = Start-Process -FilePath $check.vulkan_worker -ArgumentList @('--diagnose-vulkan') -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
+          if (-not $nativeProcess.WaitForExit(30000)) {
+            $nativeProcess.Kill()
+            $nativeProcess.WaitForExit()
+            throw "Vulkan diagnostic timed out after 30 seconds"
+          }
+          if (-not (Test-Path -LiteralPath $stdout)) { throw "Vulkan diagnostic produced no JSON" }
+          $nativeJson = Get-Content -LiteralPath $stdout -Raw
+          $native = $nativeJson | ConvertFrom-Json
+          $nativeExit = $nativeProcess.ExitCode
+          if ($native.schema_version -ne 1 -or $nativeExit -notin @(0, 3)) { throw "Invalid Vulkan diagnostic (exit=$nativeExit)" }
+          if (($nativeExit -eq 0) -ne ($null -eq $native.error)) { throw "Vulkan diagnostic exit/status mismatch" }
+          Get-Content -LiteralPath $stdout
+
+      - name: Package smoke test (no hardware discovery)
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+        run: |
+          $package = Join-Path $PWD "dist\$env:SKU"
+          $exe = Join-Path $package "QwenScribeDesktop.exe"
+          $smokeOutput = Join-Path $env:RUNNER_TEMP "$env:SKU-package-smoke.json"
+          $smokeStdout = Join-Path $env:RUNNER_TEMP "$env:SKU-package-smoke.stdout.log"
+          $smokeStderr = Join-Path $env:RUNNER_TEMP "$env:SKU-package-smoke.stderr.log"
+          Remove-Item -LiteralPath $smokeOutput,$smokeStdout,$smokeStderr -Force -ErrorAction SilentlyContinue
+          $smoke = Start-Process -FilePath $exe -ArgumentList @('--smoke-test-package', $smokeOutput) -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $smokeStdout -RedirectStandardError $smokeStderr -PassThru -WindowStyle Hidden
+          if (-not $smoke.WaitForExit(30000)) {
+            $smoke.Kill()
+            $smoke.WaitForExit()
+            throw "Package smoke timed out after 30 seconds"
+          }
+          if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $smokeOutput)) { throw "Package smoke failed with exit code $($smoke.ExitCode)" }
+          $smokeReport = Get-Content -LiteralPath $smokeOutput -Raw | ConvertFrom-Json
+          if (-not $smokeReport.ok -or $smokeReport.default_backend -notin @('vulkan', 'transformers') -or $smokeReport.unsupported_warning) {
+            throw "Package smoke reported an invalid capability result"
+          }
+          Get-Content -LiteralPath $smokeOutput
+
+      - name: Upload SKU failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.sku }}-diagnostics
+          path: |
+            ${{ runner.temp }}/${{ matrix.sku }}-check.json
+            ${{ runner.temp }}/${{ matrix.sku }}-package-files.json
+            ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.json
+            ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.stdout.log
+            ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.stderr.log
+            ${{ runner.temp }}/${{ matrix.sku }}-vulkan-diagnostic.json
+            ${{ runner.temp }}/${{ matrix.sku }}-vulkan-diagnostic.stderr.log
+            ${{ runner.temp }}/${{ matrix.sku }}-worker-startup.stdout.log
+            ${{ runner.temp }}/${{ matrix.sku }}-worker-startup.stderr.log
+            ${{ runner.temp }}/QwenASRDesktop-native-crash.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Archive SKU and write manifests
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $package = "dist\$env:SKU"
+          $archive = "dist\$env:SKU.7z"
+          & 7z a -t7z -mx=3 -mmt=on $archive $package
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip archive failed." }
+          $assets = @($archive)
+          if ((Get-Item -LiteralPath $archive).Length -gt 1800MB) {
+            Remove-Item -LiteralPath $archive -Force
+            & 7z a -t7z -mx=3 -mmt=on -v1800m $archive $package
+            if ($LASTEXITCODE -ne 0) { throw "7-Zip split archive failed." }
+            $assets = @(Get-ChildItem -LiteralPath dist -File | Where-Object { $_.Name -like "$env:SKU.7z.*" } | ForEach-Object FullName)
+          }
+          & .\scripts\report_package_size.ps1 -PackageDirectory $package -ArchivePath $assets -BuildVariant $env:VARIANT -OutputDirectory "dist\reports\$env:SKU"
+          $packageFiles = Get-ChildItem -LiteralPath $package -Recurse -File | ForEach-Object {
+            [ordered]@{ path = $_.FullName.Substring((Resolve-Path $package).Path.Length).TrimStart('\'); bytes = $_.Length; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          $archiveFiles = $assets | ForEach-Object {
+            $item = Get-Item -LiteralPath $_
+            [ordered]@{ name = $item.Name; bytes = $item.Length; sha256 = (Get-FileHash $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          $vulkanWorkerCommit = if ($env:VARIANT -eq 'vulkan') { $env:PURIPULY_COMMIT } else { $null }
+          $pytorchVersion = if ($env:VARIANT -eq 'cuda') { $env:PYTORCH_VERSION } else { $null }
+          [ordered]@{
+            commit_sha = (git rev-parse HEAD).Trim()
+            build_variant = $env:VARIANT
+            sku = $env:SKU
+            package_expanded_bytes = (($packageFiles | Measure-Object -Property bytes -Sum).Sum)
+            artifact_compressed_bytes = (($archiveFiles | Measure-Object -Property bytes -Sum).Sum)
+            files = @($packageFiles)
+            archives = @($archiveFiles)
+            third_party = [ordered]@{ ffmpeg = "Chocolatey ffmpeg runtime"; vulkan_worker_commit = $vulkanWorkerCommit; pytorch = $pytorchVersion }
+          } | ConvertTo-Json -Depth 6 | Set-Content "dist\$env:SKU-artifact-manifest.json" -Encoding utf8
+          $archiveFiles | ForEach-Object { "$($_.sha256) *$($_.name)" } | Set-Content "dist\$env:SKU.sha256.txt" -Encoding ascii
+
+      - name: Enforce Vulkan artifact target
+        if: matrix.variant == 'vulkan'
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+        run: |
+          $manifest = Get-Content "dist\$env:SKU-artifact-manifest.json" -Raw | ConvertFrom-Json
+          if ([long]$manifest.artifact_compressed_bytes -ge 500MB) {
+            throw "Vulkan artifact exceeds the hard 500 MiB target: $($manifest.artifact_compressed_bytes) bytes"
+          }
 
       - name: Upload review artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QwenScribe-Desktop-Windows-x64
+          name: ${{ matrix.sku }}
           path: |
-            dist/QwenScribe-Desktop-Windows-x64.7z.*
-            dist/QwenScribe-Desktop-Windows-x64.sha256.txt
+            dist/${{ matrix.sku }}.7z*
+            dist/${{ matrix.sku }}.sha256.txt
+            dist/${{ matrix.sku }}-artifact-manifest.json
+            dist/reports/${{ matrix.sku }}/packaging-size-report.json
+            dist/reports/${{ matrix.sku }}/packaging-size-report.md
           if-no-files-found: error
           retention-days: 14
 
-      - name: Attach files to tagged GitHub Release
+      - name: Attach SKU files to tagged GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/QwenScribe-Desktop-Windows-x64.7z.*
-            dist/QwenScribe-Desktop-Windows-x64.sha256.txt
+            dist/${{ matrix.sku }}.7z*
+            dist/${{ matrix.sku }}.sha256.txt
+            dist/${{ matrix.sku }}-artifact-manifest.json
