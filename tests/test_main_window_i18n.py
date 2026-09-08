@@ -80,3 +80,47 @@ def test_vulkan_sku_hides_transformers_controls(tmp_path: Path, monkeypatch: obj
     assert window.model_combo.currentData() == "vulkan"
     window.close()
     app.processEvents()
+
+
+def test_selected_igpu_requires_visible_restart_hint_until_relaunch(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(TranscriptionWorker, "discover_devices", lambda self: None)
+    config = ConfigService(tmp_path / "config.json")
+    model = _FakeModelService()
+    model.device_id = "auto"
+    devices = [("vulkan-index-1", "Intel UHD 770")]
+    window = MainWindow(config_service=config, model_service=model,
+                        active_backend="vulkan", vulkan_devices=devices)
+    try:
+        window._on_gpu_info(True, "Test device")
+        source = tmp_path / "sample.wav"
+        source.touch()
+        window._add_input_paths([source])
+        assert window.start_button.isEnabled()
+        window.device_combo.setCurrentIndex(window.device_combo.findData("vulkan-index-1"))
+        assert not window.start_button.isEnabled()
+        assert "重启" in window.start_button.text()
+        assert "重启" in window.start_button.toolTip()
+        window.ui_language_combo.setCurrentIndex(window.ui_language_combo.findData("en_US"))
+        assert "restart" in window.start_button.text().lower()
+        assert "restart" in window.status_label.text().lower()
+        assert config.get("vulkan_device_id") == "vulkan-index-1"
+        window.device_combo.setCurrentIndex(window.device_combo.findData("auto"))
+        assert window.start_button.isEnabled()
+        assert window.status_label.text() == "Ready"
+        window.device_combo.setCurrentIndex(window.device_combo.findData("vulkan-index-1"))
+    finally:
+        window.close()
+        app.processEvents()
+    # A relaunched service uses the persisted device; importing a file enables start.
+    model.device_id = config.get("vulkan_device_id")
+    relaunched = MainWindow(config_service=config, model_service=model,
+                           active_backend="vulkan", vulkan_devices=devices)
+    try:
+        relaunched._on_gpu_info(True, "Intel UHD 770")
+        relaunched._add_input_paths([source])
+        assert relaunched.start_button.isEnabled()
+        assert "restart" not in relaunched.start_button.text().lower()
+    finally:
+        relaunched.close()
+        app.processEvents()

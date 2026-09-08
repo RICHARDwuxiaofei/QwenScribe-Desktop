@@ -1258,12 +1258,33 @@ class MainWindow(QMainWindow):
         self._refresh_start_button()
 
     def _refresh_start_button(self) -> None:
+        restart_required = (
+            str(self.backend_combo.currentData() or "") != self._active_backend
+            or str(self.device_combo.currentData() or "") != self._active_device_id
+        )
+        restart_hint = self._t(
+            "推理方式或 GPU 已更改，请重启程序后生效",
+            "Backend or GPU changed; restart the app to apply it",
+        )
+        self.start_button.setText(
+            self._t("请重启后开始", "Restart to start")
+            if restart_required
+            else self._t("开始转写队列", "Start transcription queue")
+        )
+        self.start_button.setToolTip(restart_hint if restart_required else "")
+        if restart_required and not self._task_active:
+            # Keep the requirement visible after importing files or switching UI language.
+            self.status_label.setText(restart_hint)
+        elif not self._task_active and self.status_label.text() in {
+            "推理方式或 GPU 已更改，请重启程序后生效",
+            "Backend or GPU changed; restart the app to apply it",
+        }:
+            self.status_label.setText(self._t("就绪", "Ready"))
         self.start_button.setEnabled(
             bool(
                 not self._task_active
                 and self._backend_available
-                and str(self.backend_combo.currentData() or "") == self._active_backend
-                and str(self.device_combo.currentData() or "") == self._active_device_id
+                and not restart_required
                 and self._queue.entries
                 and self.output_edit.text().strip()
             )
