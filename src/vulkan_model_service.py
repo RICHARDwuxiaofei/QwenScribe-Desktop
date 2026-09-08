@@ -288,7 +288,13 @@ class VulkanModelService:
                 except OSError:
                     pass
         if self._temporary_directory is not None:
-            self._temporary_directory.cleanup()
+            try:
+                self._temporary_directory.cleanup()
+            except OSError:
+                # A native worker or antivirus can briefly retain the launch
+                # directory. Cleanup is best effort and must never mask the
+                # discovery/worker error that triggered disposal.
+                LOGGER.warning("Vulkan worker temporary directory cleanup failed", exc_info=True)
         self._process = None
         self._server = None
         self._connection = None

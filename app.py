@@ -59,10 +59,15 @@ def main() -> int:
 
     application_directory = resource_directory()
     _prepare_frozen_dll_search_path(application_directory)
-    if "--smoke-test" in sys.argv:
-        from src.runtime_smoke import run
+    if "--smoke-test-package" in sys.argv or "--smoke-test" in sys.argv:
+        from src.runtime_smoke import run_package
 
-        return run(Path(sys.argv[sys.argv.index("--smoke-test") + 1]))
+        option = "--smoke-test-package" if "--smoke-test-package" in sys.argv else "--smoke-test"
+        return run_package(Path(sys.argv[sys.argv.index(option) + 1]))
+    if "--smoke-test-hardware" in sys.argv:
+        from src.runtime_smoke import run_hardware
+
+        return run_hardware(Path(sys.argv[sys.argv.index("--smoke-test-hardware") + 1]))
     check_requested = "--check" in sys.argv or os.environ.get("QWENSCRIBE_RUN_CHECK") == "1"
     if check_requested:
         report = json.dumps(diagnostic(application_directory), ensure_ascii=False, sort_keys=True)

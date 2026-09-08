@@ -152,7 +152,7 @@ jobs:
             Copy-Item bin/LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt "$package\LICENSE-PuriPulyHeartGpuWorker-AGPL-3.0.txt"
           }
 
-      - name: Smoke-test packaged SKU and check package boundary
+      - name: Check packaged SKU boundary
         shell: pwsh
         env:
           SKU: ${{ matrix.sku }}
@@ -181,13 +181,10 @@ jobs:
           & $report.ffmpeg -nostdin -i $sample -af "silencedetect=noise=-35dB:d=0.1" -f null -
           python scripts/check_vulkan_package.py $package
           if ($LASTEXITCODE -ne 0) { throw "Bundled system Vulkan components" }
-          $smokeOutput = Join-Path $env:RUNNER_TEMP "$env:SKU-gui-smoke.json"
-          $env:QT_QPA_PLATFORM = 'offscreen'
-          $smoke = Start-Process -FilePath $exe -ArgumentList @('--smoke-test', $smokeOutput) -WorkingDirectory $env:RUNNER_TEMP -PassThru -WindowStyle Hidden
-          if (-not $smoke.WaitForExit(90000)) { $smoke.Kill(); throw "GUI smoke timed out" }
-          if ($smoke.ExitCode -ne 0 -or -not (Test-Path $smokeOutput)) { throw "GUI smoke failed" }
-          Get-Content $smokeOutput
           $files = @(Get-ChildItem -LiteralPath $package -Recurse -File)
+          $files | ForEach-Object {
+            [ordered]@{ path = $_.FullName.Substring((Resolve-Path $package).Path.Length).TrimStart('\'); bytes = $_.Length }
+          } | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $env:RUNNER_TEMP "$env:SKU-package-files.json") -Encoding utf8
           $forbidden = $files | Where-Object {
             $_.Extension -in @('.gguf', '.safetensors', '.part') -or $_.FullName -match '\\.venv\\|\\.pytest_cache\\|\\(pip|wheel)[-_]?cache\\|\\Logs?\\'
           }
@@ -196,17 +193,78 @@ jobs:
             $unexpected = $files | Where-Object { $_.FullName -match '(?i)\\(torch|torchgen|transformers|qwen_asr|accelerate)\\|cudnn|cublas|cudart|torch_cuda|torch_cpu' }
             if ($unexpected) { throw "Vulkan package contains CUDA/Transformers content: $($unexpected.FullName -join '; ')" }
             if (-not $report.vulkan_worker) { throw "Vulkan worker was not reported." }
-            & $report.vulkan_worker --check-startup-contract
-            $nativeJson = & $report.vulkan_worker --diagnose-vulkan
-            $nativeExit = $LASTEXITCODE
-            $native = $nativeJson | ConvertFrom-Json
-            if ($native.schema_version -ne 1 -or $nativeExit -notin @(0, 3)) { throw "Invalid Vulkan diagnostic" }
-            if (($nativeExit -eq 0) -ne ($null -eq $native.error)) { throw "Vulkan diagnostic exit/status mismatch" }
-            $nativeJson | Set-Content (Join-Path $env:RUNNER_TEMP 'vulkan-diagnostic.json')
           } else {
             $worker = $files | Where-Object { $_.Name -eq 'PuriPulyHeartGpuWorker.exe' }
             if ($worker) { throw "CUDA package must not contain the Vulkan worker." }
           }
+
+      - name: Validate Vulkan worker and native diagnostic
+        if: matrix.build_worker
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+        run: |
+          $check = Get-Content (Join-Path $env:RUNNER_TEMP "$env:SKU-check.json") -Raw | ConvertFrom-Json
+          if (-not $check.vulkan_worker) { throw "Vulkan worker was not reported." }
+          & $check.vulkan_worker --check-startup-contract
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan worker startup contract failed with exit code $LASTEXITCODE" }
+          $stdout = Join-Path $env:RUNNER_TEMP "$env:SKU-vulkan-diagnostic.json"
+          $stderr = Join-Path $env:RUNNER_TEMP "$env:SKU-vulkan-diagnostic.stderr.log"
+          Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue
+          $nativeProcess = Start-Process -FilePath $check.vulkan_worker -ArgumentList @('--diagnose-vulkan') -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
+          if (-not $nativeProcess.WaitForExit(30000)) {
+            $nativeProcess.Kill()
+            $nativeProcess.WaitForExit()
+            throw "Vulkan diagnostic timed out after 30 seconds"
+          }
+          if (-not (Test-Path -LiteralPath $stdout)) { throw "Vulkan diagnostic produced no JSON" }
+          $nativeJson = Get-Content -LiteralPath $stdout -Raw
+          $native = $nativeJson | ConvertFrom-Json
+          $nativeExit = $nativeProcess.ExitCode
+          if ($native.schema_version -ne 1 -or $nativeExit -notin @(0, 3)) { throw "Invalid Vulkan diagnostic (exit=$nativeExit)" }
+          if (($nativeExit -eq 0) -ne ($null -eq $native.error)) { throw "Vulkan diagnostic exit/status mismatch" }
+          Get-Content -LiteralPath $stdout
+
+      - name: Package smoke test (no hardware discovery)
+        shell: pwsh
+        env:
+          SKU: ${{ matrix.sku }}
+        run: |
+          $package = Join-Path $PWD "dist\$env:SKU"
+          $exe = Join-Path $package "QwenScribeDesktop.exe"
+          $smokeOutput = Join-Path $env:RUNNER_TEMP "$env:SKU-package-smoke.json"
+          $smokeStdout = Join-Path $env:RUNNER_TEMP "$env:SKU-package-smoke.stdout.log"
+          $smokeStderr = Join-Path $env:RUNNER_TEMP "$env:SKU-package-smoke.stderr.log"
+          Remove-Item -LiteralPath $smokeOutput,$smokeStdout,$smokeStderr -Force -ErrorAction SilentlyContinue
+          $smoke = Start-Process -FilePath $exe -ArgumentList @('--smoke-test-package', $smokeOutput) -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $smokeStdout -RedirectStandardError $smokeStderr -PassThru -WindowStyle Hidden
+          if (-not $smoke.WaitForExit(30000)) {
+            $smoke.Kill()
+            $smoke.WaitForExit()
+            throw "Package smoke timed out after 30 seconds"
+          }
+          if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $smokeOutput)) { throw "Package smoke failed with exit code $($smoke.ExitCode)" }
+          $smokeReport = Get-Content -LiteralPath $smokeOutput -Raw | ConvertFrom-Json
+          if (-not $smokeReport.ok -or $smokeReport.default_backend -notin @('vulkan', 'transformers') -or $smokeReport.unsupported_warning) {
+            throw "Package smoke reported an invalid capability result"
+          }
+          Get-Content -LiteralPath $smokeOutput
+
+      - name: Upload SKU failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.sku }}-diagnostics
+          path: |
+            ${{ runner.temp }}/${{ matrix.sku }}-check.json
+            ${{ runner.temp }}/${{ matrix.sku }}-package-files.json
+            ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.json
+            ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.stdout.log
+            ${{ runner.temp }}/${{ matrix.sku }}-package-smoke.stderr.log
+            ${{ runner.temp }}/${{ matrix.sku }}-vulkan-diagnostic.json
+            ${{ runner.temp }}/${{ matrix.sku }}-vulkan-diagnostic.stderr.log
+            ${{ runner.temp }}/QwenASRDesktop-native-crash.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Archive SKU and write manifests
         shell: pwsh
