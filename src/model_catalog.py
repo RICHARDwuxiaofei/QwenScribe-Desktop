@@ -15,10 +15,11 @@ from typing import Literal
 from platformdirs import user_data_path
 
 
-BackendName = Literal["transformers", "vulkan"]
+BackendName = Literal["transformers", "vulkan", "forced_aligner"]
 DownloadRegion = Literal["china", "international"]
 
 TRANSFORMERS_MODEL_ID = "Qwen/Qwen3-ASR-1.7B"
+FORCED_ALIGNER_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
 TRANSFORMERS_REVISION = "7278e1e70fe206f11671096ffdd38061171dd6e5"
 VULKAN_REPO_ID = "handy-computer/Qwen3-ASR-1.7B-gguf"
 VULKAN_REVISION = "92282af1610a2db19d66f2bef1e260f5deca782d"
@@ -65,12 +66,17 @@ def download_target(backend: BackendName) -> Path:
     root = user_models_directory()
     if backend == "transformers":
         return root / "Qwen3-ASR-1.7B"
+    if backend == "forced_aligner":
+        return root / "Qwen3-ForcedAligner-0.6B"
     return root / VULKAN_FILENAME
 
 
 def model_candidates(backend: BackendName, application_directory: Path) -> tuple[Path, ...]:
     application_directory = Path(application_directory)
-    if backend == "transformers":
+    if backend == "forced_aligner":
+        configured = os.environ.get("QWEN_FORCED_ALIGNER_MODEL_PATH", "").strip()
+        local_name = "Qwen3-ForcedAligner-0.6B"
+    elif backend == "transformers":
         configured = os.environ.get("QWEN_ASR_MODEL_PATH", "").strip()
         local_name = "Qwen3-ASR-1.7B"
     else:
@@ -96,6 +102,9 @@ def is_complete_model(backend: BackendName, path: Path) -> bool:
         return path.is_file() and path.stat().st_size == VULKAN_SIZE
     if not path.is_dir():
         return False
+    if backend == "forced_aligner":
+        return all((path / name).is_file() and (path / name).stat().st_size > 0
+                   for name in ("config.json", "preprocessor_config.json", "tokenizer_config.json", "vocab.json", "model.safetensors"))
     # Accept a complete manually supplied official snapshot even if a future
     # revision changes JSON byte sizes.  Files downloaded by this application
     # are checked against the pinned catalog in ModelDownloadService.

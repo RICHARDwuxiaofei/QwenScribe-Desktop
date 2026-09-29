@@ -286,3 +286,27 @@ GitHub 云编译不是技术上的强制要求，但对于你的发布流程更�
 - `src/config_service.py` / `src/logging_service.py`：用户配置和轮转日志。
 
 真实验收仍需要在目标 Windows 11 + NVIDIA GPU 上，用实际媒体验证 FFmpeg 编码支持、首次模型下载、长片段速度和 12GB 显存表现；单元测试不会替代这些硬件测试。
+
+## Galgame TTS Alignment & Cutter
+
+Gal mode cuts one same-character Gemini TTS master PCM WAV into one WAV per voice job. Supply the master WAV and an ordered JSONL manifest containing the **exact script text**. Forced Alignment is the primary timing source; fine silence detection only refines boundaries. Optional Qwen3-ASR QA finds likely omissions or cross-line speech after cutting. STT never decides the original line text.
+
+Recommended production chain:
+
+```text
+Gemini 3.8 TTS · same character/voice · multiple text blocks in one request
+    → batch.wav + batch.jsonl [+ optional batch.meta.json]
+    → QwenScribe Gal Cutter (CUDA/Transformers)
+    → per-line PCM WAV + alignment_report.json + cut_manifest.jsonl + qa_report.json
+    → optional Qwen3-ASR QA
+```
+
+Use the Gal mode selector in the desktop app, or the deterministic CLI:
+
+```powershell
+python -m src.gal_cutter_cli --audio D:\voice\batch.wav --manifest D:\voice\batch.jsonl --output D:\voice\cut --resume
+```
+
+Optional flags: `--meta`, `--asr-qa`, `--device cuda:0`, `--silence-threshold-db`, `--min-silence-ms`, `--pre-roll-ms`, `--post-roll-ms`, `--tagged-event-padding-ms`, `--no-fine-silence`. The Forced Aligner model is downloaded separately via the Gal page (ModelScope in China or Hugging Face internationally), or supplied with `QWEN_FORCED_ALIGNER_MODEL_PATH`. Neither weights nor final voice WAVs are bundled into the app. Gal Cutter is unavailable in the Vulkan-only package; normal Vulkan STT is unchanged.
+
+Batches over 295 seconds are rejected; target 240 seconds or less. Standard PCM WAV is sliced at sample boundaries without downsampling, gain or speed changes. Review any `NEEDS_REVIEW` or `ALIGNMENT_FAILED` report. Model timing and QA still require validation with a real CUDA GPU and Gemini master WAV. See [batch contract](docs/GAL_TTS_BATCH_CONTRACT.md).

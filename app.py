@@ -51,6 +51,10 @@ def _enable_native_crash_logging(log_path: Path) -> None:
 
 
 def main() -> int:
+    if "--forced-aligner-worker" in sys.argv:
+        from src.forced_aligner_worker import main as worker_main
+
+        return worker_main()
     if "--transformers-worker" in sys.argv:
         # PyInstaller onedir reuses this executable for the isolated CUDA worker.
         from src.transformers_worker import main as worker_main

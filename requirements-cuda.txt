@@ -1,3 +1,4 @@
 # Install the pinned CUDA PyTorch wheel before this file; see README.md.
 -r requirements-common.txt
 qwen-asr==0.0.6
+modelscope>=1.20,<2

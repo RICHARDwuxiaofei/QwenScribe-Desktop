@@ -18,6 +18,7 @@ from .model_catalog import (
     ModelFile,
     TRANSFORMERS_FILES,
     TRANSFORMERS_MODEL_ID,
+    FORCED_ALIGNER_MODEL_ID,
     TRANSFORMERS_REVISION,
     VULKAN_FILENAME,
     VULKAN_REPO_ID,
@@ -55,6 +56,28 @@ class ModelDownloadService:
         progress: ProgressCallback,
     ) -> Path:
         target = download_target(backend)
+        if backend == "forced_aligner":
+            self._check_cancel(cancel_event)
+            target.mkdir(parents=True, exist_ok=True)
+            try:
+                if region == "china":
+                    from modelscope import snapshot_download
+
+                    snapshot_download(FORCED_ALIGNER_MODEL_ID, local_dir=str(target))
+                else:
+                    from huggingface_hub import snapshot_download
+
+                    snapshot_download(FORCED_ALIGNER_MODEL_ID, local_dir=str(target))
+            except ImportError as error:
+                package = "modelscope" if region == "china" else "huggingface_hub"
+                raise ModelDownloadError(f"缺少 {package} 下载依赖；请安装 CUDA 版依赖") from error
+            except Exception as error:
+                raise ModelDownloadError(f"Forced Aligner 下载失败（{region}, {target}）：{error}") from error
+            self._check_cancel(cancel_event)
+            if not is_complete_model(backend, target):
+                raise ModelDownloadError(f"Forced Aligner 下载不完整：{target}")
+            progress(1, 1, "Qwen3-ForcedAligner-0.6B")
+            return target
         if backend == "transformers":
             target.mkdir(parents=True, exist_ok=True)
             total = sum(item.size_bytes for item in TRANSFORMERS_FILES)

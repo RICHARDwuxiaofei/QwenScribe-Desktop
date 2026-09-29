@@ -47,6 +47,7 @@ from .i18n import (
 )
 from .language_map import LANGUAGE_MAP, language_for_label, valid_label_or_default
 from .model_service import ModelService
+from .gal_cutter_page import GalCutterPage
 from .model_download_service import (
     ModelDownloadCancelled,
     ModelDownloadService,
@@ -295,6 +296,11 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(app_subtitle)
         sidebar_layout.addSpacing(12)
         sidebar_layout.addWidget(local_badge)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("普通转写", "stt")
+        self.mode_combo.addItem("Gal TTS Cutter", "gal")
+        sidebar_layout.addWidget(QLabel("模式"))
+        sidebar_layout.addWidget(self.mode_combo)
 
         language_row = QHBoxLayout()
         language_row.addWidget(QLabel("界面语言"))
@@ -416,7 +422,11 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumHeight(115)
         self.log_view.setPlaceholderText("主要运行状态会显示在这里；完整异常写入用户日志文件。")
         layout.addWidget(self.log_view)
-        root.addWidget(content, 1)
+        self.mode_stack = QStackedWidget()
+        self.mode_stack.addWidget(content)
+        self.gal_page = GalCutterPage()
+        self.mode_stack.addWidget(self.gal_page)
+        root.addWidget(self.mode_stack, 1)
 
     def _build_queue_page(self) -> QWidget:
         page = QWidget()
@@ -473,6 +483,9 @@ class MainWindow(QMainWindow):
         return page
 
     def _connect_ui(self) -> None:
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self.gal_page.download_requested.connect(self._start_model_download)
+        self.gal_page.running_changed.connect(lambda running: self.mode_combo.setEnabled(not running))
         self.drop_area.paths_dropped.connect(self._add_input_paths)
         self.drop_area.browse_files_requested.connect(self._choose_files)
         self.drop_area.browse_folder_requested.connect(self._choose_folder)
@@ -492,6 +505,13 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self._start_batch)
         self.cancel_button.clicked.connect(self._cancel_batch)
         self.open_output_button.clicked.connect(self._open_output_directory)
+
+    def _on_mode_changed(self, index: int) -> None:
+        self.mode_stack.setCurrentIndex(index)
+        if index == 1 and self._model_service is not None and hasattr(self._model_service, "close"):
+            # Free the STT model before Gal's separate CUDA aligner loads.
+            self._model_service.close()
+            self.gal_page.refresh()
 
     def _start_worker_thread(self, model_service: Any | None = None) -> None:
         from .build_config import application_directory
@@ -1016,6 +1036,7 @@ class MainWindow(QMainWindow):
 
     def _on_model_download_completed(self, path: str) -> None:
         self._finish_model_download_ui()
+        self.gal_page.refresh()
         self.status_label.setText(self._t("模型下载完成", "Model download completed"))
         self._append_log(
             self._t(f"模型下载并校验完成：{path}", f"Model downloaded and verified: {path}")
@@ -1236,6 +1257,7 @@ class MainWindow(QMainWindow):
             )
 
     def _set_controls_for_task(self, active: bool) -> None:
+        self.mode_combo.setEnabled(not active)
         for widget in (
             self.add_files_button,
             self.add_folder_button,
@@ -1381,6 +1403,10 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self.gal_page.worker is not None:
+            self.gal_page.cancel_run()
+            event.ignore()
+            return
         if self._download_active:
             answer = QMessageBox.question(
                 self,
