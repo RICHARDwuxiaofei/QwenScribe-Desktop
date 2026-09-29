@@ -27,13 +27,19 @@ def main() -> int:
                 reply(protocol, True, result={})
                 return 0
             if command == "load":
-                device = int(request["device_index"])
-                if not torch.cuda.is_available() or not 0 <= device < torch.cuda.device_count():
-                    raise RuntimeError(f"CUDA cuda:{device} 不可用")
-                dtype = torch.bfloat16 if torch.cuda.get_device_properties(device).major >= 8 else torch.float16
+                device_name = str(request.get("device", f"cuda:{request.get('device_index', 0)}"))
+                if device_name == "cpu":
+                    dtype = torch.float32
+                elif device_name.startswith("cuda:") and device_name[5:].isdigit():
+                    device = int(device_name[5:])
+                    if not torch.cuda.is_available() or not 0 <= device < torch.cuda.device_count():
+                        raise RuntimeError(f"CUDA {device_name} 不可用")
+                    dtype = torch.bfloat16 if torch.cuda.get_device_properties(device).major >= 8 else torch.float16
+                else:
+                    raise RuntimeError(f"不支持的 Forced Aligner 设备：{device_name}")
                 with contextlib.redirect_stdout(sys.stderr):
-                    model = Qwen3ForcedAligner.from_pretrained(request["model_source"], dtype=dtype, device_map=f"cuda:{device}")
-                reply(protocol, True, result={"device": f"cuda:{device}"})
+                    model = Qwen3ForcedAligner.from_pretrained(request["model_source"], dtype=dtype, device_map=device_name)
+                reply(protocol, True, result={"device": device_name})
             elif command == "align":
                 if model is None:
                     raise RuntimeError("Forced Aligner 尚未加载")
@@ -44,7 +50,8 @@ def main() -> int:
                 reply(protocol, True, result={"units": [{"text": u.text, "start_time": u.start_time, "end_time": u.end_time} for u in results[0]]})
             elif command == "clear_cache":
                 gc.collect()
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 reply(protocol, True, result={})
             else:
                 raise RuntimeError(f"未知命令：{command}")

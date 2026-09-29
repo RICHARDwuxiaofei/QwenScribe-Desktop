@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -48,8 +49,9 @@ class MediaService:
 
     def __init__(self, application_directory: Path) -> None:
         self.application_directory = Path(application_directory)
-        self.ffmpeg = self._find_executable("ffmpeg.exe", "ffmpeg")
-        self.ffprobe = self._find_executable("ffprobe.exe", "ffprobe")
+        suffix = ".exe" if os.name == "nt" else ""
+        self.ffmpeg = self._find_executable(f"ffmpeg{suffix}", "ffmpeg")
+        self.ffprobe = self._find_executable(f"ffprobe{suffix}", "ffprobe")
         self._process: subprocess.Popen[str] | None = None
         self._process_lock = threading.Lock()
         self._creationflags, self._startupinfo = _windows_process_flags()

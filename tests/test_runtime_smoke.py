@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,10 @@ import src.vulkan_model_service as vulkan_model_service
 def _fake_package(tmp_path: Path, *, worker: bool = True) -> Path:
     root = tmp_path / "_internal"
     (root / "bin").mkdir(parents=True)
-    names = ["ffmpeg.exe", "ffprobe.exe"]
+    suffix = ".exe" if os.name == "nt" else ""
+    names = [f"ffmpeg{suffix}", f"ffprobe{suffix}"]
     if worker:
-        names.append("PuriPulyHeartGpuWorker.exe")
+        names.append(f"PuriPulyHeartGpuWorker{suffix}")
     for name in names:
         (root / "bin" / name).write_bytes(b"test")
     return root
@@ -52,7 +54,7 @@ def test_hardware_smoke_always_disposes_worker(tmp_path, monkeypatch):
             disposed.append(True)
 
         def _resolve_executable_path(self):
-            return root / "bin" / "PuriPulyHeartGpuWorker.exe"
+            return root / "bin" / f"PuriPulyHeartGpuWorker{'.exe' if os.name == 'nt' else ''}"
 
     monkeypatch.setattr(vulkan_model_service, "VulkanModelService", FakeService)
     output = tmp_path / "hardware-smoke.json"
@@ -75,3 +77,15 @@ def test_cuda_package_smoke_uses_transformers_without_vulkan_worker(tmp_path, mo
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["default_backend"] == "transformers"
     assert report["unsupported_warning"] is False
+
+
+def test_linux_gal_cpu_package_needs_no_ffmpeg_or_vulkan_worker(tmp_path, monkeypatch):
+    root = tmp_path / "_internal"
+    root.mkdir()
+    monkeypatch.setenv("QWENSCRIBE_BUILD_VARIANT", "gal_cpu")
+    monkeypatch.setattr(runtime_smoke, "application_directory", lambda: root)
+    output = tmp_path / "gal-smoke.json"
+    assert runtime_smoke.run_package(output) == 0
+    report = json.loads(output.read_text())
+    assert report["default_backend"] == "gal_cpu"
+    assert report["ok"]

@@ -21,9 +21,10 @@ class ForcedAlignerError(RuntimeError):
 
 
 class ForcedAlignerService:
-    def __init__(self, application_directory: Path | None = None, device_index: int = 0, align_fn: Callable | None = None):
+    def __init__(self, application_directory: Path | None = None, device_index: int = 0, align_fn: Callable | None = None, device: str | None = None):
         self.application_directory = Path(application_directory or Path.cwd())
         self.device_index = device_index
+        self.device = device or f"cuda:{device_index}"
         self._align_fn = align_fn
         self._process: subprocess.Popen | None = None
         self._lock = threading.Lock()
@@ -41,8 +42,8 @@ class ForcedAlignerService:
             return
         source = find_installed_model("forced_aligner", self.application_directory)
         if source is None:
-            raise ForcedAlignerError(f"缺少 {FORCED_ALIGNER_MODEL_ID}；请先在 CUDA 版下载模型，或设置 QWEN_FORCED_ALIGNER_MODEL_PATH")
-        self._request("load", model_source=str(source), device_index=self.device_index)
+            raise ForcedAlignerError(f"缺少 {FORCED_ALIGNER_MODEL_ID}；请在 Gal 页面下载模型，或设置 QWEN_FORCED_ALIGNER_MODEL_PATH")
+        self._request("load", model_source=str(source), device=self.device)
         self._loaded = True
 
     def align(self, audio: Path, text: str, language: str) -> list[Unit]:

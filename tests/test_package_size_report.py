@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
+import pytest
+
+pytestmark = pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell packaging script requires pwsh")
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

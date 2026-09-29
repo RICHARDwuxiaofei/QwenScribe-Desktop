@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import shutil
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -23,11 +25,11 @@ class GalRunWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, audio: Path, manifest: Path, meta: Path | None, output: Path, qa: bool, fine_silence: bool):
+    def __init__(self, audio: Path, manifest: Path, meta: Path | None, output: Path, qa: bool, fine_silence: bool, device: str):
         super().__init__()
         self.audio, self.manifest, self.meta, self.output, self.qa = audio, manifest, meta, output, qa
         self.cancel_event = threading.Event()
-        self.aligner = ForcedAlignerService()
+        self.aligner = ForcedAlignerService(device=device)
         self.fine_silence = fine_silence
 
     @Slot()
@@ -55,6 +57,7 @@ class GalCutterPage(QWidget):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
+        self.device = "cpu" if current_build().variant == "gal_cpu" or (os.name != "nt" and shutil.which("nvidia-smi") is None) else "cuda:0"
         self.worker = None
         self.thread = None
         layout = QVBoxLayout(self)
@@ -62,6 +65,7 @@ class GalCutterPage(QWidget):
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         layout.addWidget(QLabel("准确剧本文本 → Forced Aligner → 自然边界 → 每句 WAV"))
+        layout.addWidget(QLabel(f"Forced Aligner 设备：{self.device}" + (" · CPU 推理会较慢" if self.device == "cpu" else "")))
         self.edits = {}
         for key, label, select, directory in (("audio", "Master WAV", "选择 WAV", False), ("manifest", "Batch JSONL", "选择 JSONL", False), ("meta", "Metadata（可选）", "选择 JSON", False), ("output", "输出根目录", "选择目录", True)):
             row = QHBoxLayout()
@@ -81,7 +85,8 @@ class GalCutterPage(QWidget):
         self.model_status = QLabel()
         model_row.addWidget(self.model_status, 1)
         self.region = QComboBox()
-        self.region.addItem("ModelScope（中国）", "china")
+        if current_build().variant != "gal_cpu":
+            self.region.addItem("ModelScope（中国）", "china")
         self.region.addItem("Hugging Face（国际）", "international")
         model_row.addWidget(self.region)
         self.download = QPushButton("下载 Forced Aligner")
@@ -94,6 +99,9 @@ class GalCutterPage(QWidget):
         self.silence = QCheckBox("Fine silence refinement")
         self.silence.setChecked(True)
         self.qa = QCheckBox("Qwen ASR QA（完成切割后运行）")
+        if self.device == "cpu":
+            self.qa.setEnabled(False)
+            self.qa.setToolTip("当前 ASR QA 后端需要 CUDA；CPU 模式仍可完成对齐和切割")
         for box in (self.alignment, self.silence, self.qa):
             layout.addWidget(box)
         actions = QHBoxLayout()
@@ -144,7 +152,7 @@ class GalCutterPage(QWidget):
         event.acceptProposedAction()
 
     def refresh(self):
-        supported = "transformers" in current_build().backends
+        supported = "transformers" in current_build().backends or current_build().variant == "gal_cpu"
         installed = find_installed_model("forced_aligner", Path.cwd())
         self.model_status.setText("Forced Aligner：已安装" if installed else "Forced Aligner：未安装")
         self.download.setEnabled(supported)
@@ -162,7 +170,7 @@ class GalCutterPage(QWidget):
     def start_run(self):
         self.results.clear()
         self.preview.clear()
-        self.worker = GalRunWorker(Path(self.edits["audio"].text()), Path(self.edits["manifest"].text()), Path(self.edits["meta"].text()) if self.edits["meta"].text() else None, Path(self.edits["output"].text()), self.qa.isChecked(), self.silence.isChecked())
+        self.worker = GalRunWorker(Path(self.edits["audio"].text()), Path(self.edits["manifest"].text()), Path(self.edits["meta"].text()) if self.edits["meta"].text() else None, Path(self.edits["output"].text()), self.qa.isChecked(), self.silence.isChecked(), self.device)
         self.thread = QThread(self)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)

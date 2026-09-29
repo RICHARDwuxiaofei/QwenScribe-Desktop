@@ -8,6 +8,7 @@ the worker's ``--diagnose-vulkan`` command so CI does not require a GPU.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -57,21 +58,23 @@ def run_package(output: Path) -> int:
         _phase(report, "resolve_resource_directory", path=str(root))
         if warning:
             raise RuntimeError("fresh package selected an unsupported backend")
+        suffix = ".exe" if os.name == "nt" else ""
         if backend == "vulkan":
-            worker = root / "bin" / "PuriPulyHeartGpuWorker.exe"
+            worker = root / "bin" / f"PuriPulyHeartGpuWorker{suffix}"
             report["worker_path"] = str(worker)
             if not worker.is_file():
                 raise FileNotFoundError(f"Vulkan worker is missing: {worker}")
-        elif backend != "transformers":
+        elif backend not in ("transformers", "gal_cpu"):
             raise RuntimeError(f"unsupported package backend: {backend}")
 
-        ffmpeg = root / "bin" / "ffmpeg.exe"
-        ffprobe = root / "bin" / "ffprobe.exe"
-        report["ffmpeg_path"] = str(ffmpeg)
-        report["ffprobe_path"] = str(ffprobe)
-        if not ffmpeg.is_file() or not ffprobe.is_file():
-            raise FileNotFoundError("packaged FFmpeg/FFprobe is missing")
-        if backend == "transformers" and (root / "bin" / "PuriPulyHeartGpuWorker.exe").exists():
+        if backend != "gal_cpu":
+            ffmpeg = root / "bin" / f"ffmpeg{suffix}"
+            ffprobe = root / "bin" / f"ffprobe{suffix}"
+            report["ffmpeg_path"] = str(ffmpeg)
+            report["ffprobe_path"] = str(ffprobe)
+            if not ffmpeg.is_file() or not ffprobe.is_file():
+                raise FileNotFoundError("packaged FFmpeg/FFprobe is missing")
+        if backend in ("transformers", "gal_cpu") and (root / "bin" / f"PuriPulyHeartGpuWorker{suffix}").exists():
             raise RuntimeError("CUDA package contains the Vulkan worker")
         _phase(report, "package_validation", backend=backend)
         report["ok"] = True

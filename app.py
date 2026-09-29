@@ -51,6 +51,10 @@ def _enable_native_crash_logging(log_path: Path) -> None:
 
 
 def main() -> int:
+    if "--gal-cutter-cli" in sys.argv:
+        from src.gal_cutter_cli import main as gal_cli_main
+
+        return gal_cli_main(sys.argv[sys.argv.index("--gal-cutter-cli") + 1:])
     if "--forced-aligner-worker" in sys.argv:
         from src.forced_aligner_worker import main as worker_main
 
@@ -118,7 +122,9 @@ def main() -> int:
     if unsupported_backend:
         logger.warning(unsupported_backend_message(requested_backend, capabilities))
 
-    if backend == "vulkan":
+    if backend == "gal_cpu":
+        model_service = None
+    elif backend == "vulkan":
         selected_device = str(config.get("vulkan_device_id", "auto")).strip() or "auto"
         model_service = VulkanModelService(
             application_directory,

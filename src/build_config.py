@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-BUILD_VARIANTS = frozenset({"full", "vulkan", "cuda"})
+BUILD_VARIANTS = frozenset({"full", "vulkan", "cuda", "gal_cpu"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +37,7 @@ def current_build() -> BuildCapabilities:
         "full": frozenset({"transformers", "vulkan"}),
         "vulkan": frozenset({"vulkan"}),
         "cuda": frozenset({"transformers"}),
+        "gal_cpu": frozenset(),
     }[variant]
     return BuildCapabilities(variant=variant, backends=backends)
 
@@ -49,6 +50,8 @@ def application_directory() -> Path:
 def choose_supported_backend(requested: str | None, capabilities: BuildCapabilities | None = None) -> tuple[str, bool]:
     """Return the supported operational backend and flag an invalid preference."""
     capabilities = capabilities or current_build()
+    if capabilities.variant == "gal_cpu":
+        return "gal_cpu", requested not in (None, "gal_cpu")
     if requested is None:
         return ("transformers" if capabilities.has_transformers_backend else "vulkan"), False
     if requested in capabilities.backends:
@@ -60,6 +63,8 @@ def choose_supported_backend(requested: str | None, capabilities: BuildCapabilit
 
 def unsupported_backend_message(requested: str, capabilities: BuildCapabilities | None = None) -> str:
     capabilities = capabilities or current_build()
+    if capabilities.variant == "gal_cpu":
+        return "当前发行版本仅支持 Gal TTS Cutter（CPU）；普通 STT 需要 Windows CUDA 或 Vulkan 发行版。"
     labels = {"transformers": "CUDA / Transformers", "vulkan": "Vulkan / GGUF"}
     available = "、".join(labels[item] for item in sorted(capabilities.backends))
     return (
@@ -72,9 +77,10 @@ def diagnostic(application_directory: Path) -> dict[str, object]:
     """Return a JSON-safe package diagnostic without importing heavy backends."""
     capabilities = current_build()
     application_directory = Path(application_directory).resolve()
-    worker = application_directory / "bin" / "PuriPulyHeartGpuWorker.exe"
-    ffmpeg = application_directory / "bin" / "ffmpeg.exe"
-    ffprobe = application_directory / "bin" / "ffprobe.exe"
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    worker = application_directory / "bin" / f"PuriPulyHeartGpuWorker{executable_suffix}"
+    ffmpeg = application_directory / "bin" / f"ffmpeg{executable_suffix}"
+    ffprobe = application_directory / "bin" / f"ffprobe{executable_suffix}"
     return {
         "application_directory": str(application_directory),
         "build_variant": capabilities.variant,

@@ -31,3 +31,7 @@ Optional `batch.meta.json`:
 When supplied, metadata must agree with the WAV, JSONL, character and language. `input_sha256`, if present, is the master WAV SHA-256. Inline vocal tags such as `<sigh>`, `<breath>`, `<laugh>`, `<cough>`, `<short pause>` are removed only from alignment text; the original `text` stays in reports. Such rows receive wider boundary padding and a review recommendation. Every row needs lexical speech text after tag removal.
 
 Output is written only below a user-selected root. Reports are `alignment_report.json`, `cut_manifest.jsonl`, and `qa_report.json` in that root. Use a distinct output root per batch. Resume checks the master SHA-256, ordered jobs/text/paths, model ID, schema, cutter settings, and each output WAV SHA-256. Changed inputs are reprocessed. The cutter refuses alignment beyond 295 seconds; generate batches of at most 240 seconds where possible.
+
+## Linux CPU execution
+
+The Fedora 44 / Linux Gal CPU release uses the same JSONL and reports. Its Forced Aligner runs with `--device cpu` and float32; it does not provide CUDA ASR QA. It processes standard PCM master WAVs without FFmpeg and preserves their sample rate. GPU/CUDA and real TTS timing still need separate hardware validation.

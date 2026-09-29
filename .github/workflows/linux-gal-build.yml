@@ -1,0 +1,71 @@
+name: Linux Gal CPU build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libglib2.0-0 libfontconfig1 libxkbcommon0 libxcb1 libxcb-cursor0
+      - name: Install CPU runtime and build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements-dev.txt -r requirements-linux-gal.txt
+          python -m pip install --no-deps 'qwen-asr==0.0.6'
+          python -c 'import torch; from qwen_asr import Qwen3ForcedAligner; print(torch.__version__, torch.cuda.is_available(), Qwen3ForcedAligner.__name__)'
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Build and smoke test Linux package
+        run: bash scripts/build_linux_gal.sh
+      - name: GUI startup smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set +e
+          timeout 12s dist/QwenScribe-GalCPU-Linux-x86_64/QwenScribeDesktop
+          result=$?
+          if [ "$result" -ne 124 ]; then
+            echo "GUI exited before timeout: $result" >&2
+            exit 1
+          fi
+      - name: Upload Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: QwenScribe-GalCPU-Linux-x86_64
+          path: |
+            dist/QwenScribe-GalCPU-Linux-x86_64.tar.gz
+            dist/QwenScribe-GalCPU-Linux-x86_64.sha256
+            dist/gal-linux-check.json
+            dist/gal-linux-smoke.json
+            dist/gal-linux-worker-smoke.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach Linux package to tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/QwenScribe-GalCPU-Linux-x86_64.tar.gz
+            dist/QwenScribe-GalCPU-Linux-x86_64.sha256

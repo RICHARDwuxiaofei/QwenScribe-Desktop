@@ -30,3 +30,4 @@ downloads/
 .vs/
 Thumbs.db
 .DS_Store
+.venv-gal/

@@ -269,7 +269,11 @@ class MainWindow(QMainWindow):
         self._capture_static_translations()
         self._restore_settings()
         self._connect_ui()
-        self._start_worker_thread(model_service)
+        if active_backend == "gal_cpu":
+            self.mode_combo.setCurrentIndex(1)
+            self.mode_combo.setEnabled(False)
+        else:
+            self._start_worker_thread(model_service)
         if self._unsupported_backend_message:
             QTimer.singleShot(0, self._show_unsupported_backend_message)
 
@@ -485,7 +489,7 @@ class MainWindow(QMainWindow):
     def _connect_ui(self) -> None:
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.gal_page.download_requested.connect(self._start_model_download)
-        self.gal_page.running_changed.connect(lambda running: self.mode_combo.setEnabled(not running))
+        self.gal_page.running_changed.connect(lambda running: self.mode_combo.setEnabled(not running and self._active_backend != "gal_cpu"))
         self.drop_area.paths_dropped.connect(self._add_input_paths)
         self.drop_area.browse_files_requested.connect(self._choose_files)
         self.drop_area.browse_folder_requested.connect(self._choose_folder)
@@ -1257,7 +1261,7 @@ class MainWindow(QMainWindow):
             )
 
     def _set_controls_for_task(self, active: bool) -> None:
-        self.mode_combo.setEnabled(not active)
+        self.mode_combo.setEnabled(not active and self._active_backend != "gal_cpu")
         for widget in (
             self.add_files_button,
             self.add_folder_button,
@@ -1455,6 +1459,9 @@ class MainWindow(QMainWindow):
                 "ui_language": self._ui_language,
             }
         )
+        if self._active_backend == "gal_cpu":
+            event.accept()
+            return
         QMetaObject.invokeMethod(
             self._worker,
             "shutdown_backend",

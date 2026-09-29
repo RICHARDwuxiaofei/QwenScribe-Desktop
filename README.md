@@ -4,11 +4,11 @@
 
 ## 中文简介
 
-QwenScribe Desktop（内部项目名 QwenASRDesktop）是面向 Windows 11 的完全本地视频/音频转文字桌面应用。它支持两套可切换后端：官方 `qwen-asr` Transformers + PyTorch CUDA，以及 Qwen3-ASR-1.7B Q6_K GGUF + transcribe.cpp Vulkan。Vulkan 后端可以严格选择 Intel 核显或 NVIDIA 独显。输入文件不会上传，最终只生成 UTF-8 TXT。界面可在简体中文和 English 之间即时切换。
+QwenScribe Desktop（内部项目名 QwenASRDesktop）包含 Windows 11 本地视频/音频转文字应用，以及 Linux Galgame TTS Cutter CPU 版本。Windows 普通转写支持官方 `qwen-asr` Transformers + PyTorch CUDA 和 Qwen3-ASR-1.7B Q6_K GGUF + transcribe.cpp Vulkan；Linux Gal CPU 版本处理带准确剧本文本的 TTS batch WAV。输入文件不会上传。界面可在简体中文和 English 之间即时切换。
 
 ## English Overview
 
-QwenScribe Desktop is a fully local video and audio transcription app for Windows 11. It supports two selectable inference backends: the official `qwen-asr` Transformers backend with PyTorch CUDA, and a Qwen3-ASR-1.7B Q6_K GGUF backend powered by transcribe.cpp/Vulkan. The Vulkan route can target an explicitly selected integrated or discrete GPU. Media never leaves the computer, and the only final output is a clean UTF-8 TXT file without timestamps.
+QwenScribe Desktop includes a local Windows 11 transcription app and a Linux Galgame TTS Cutter CPU edition. Windows STT supports official `qwen-asr` Transformers with PyTorch CUDA and Qwen3-ASR-1.7B Q6_K GGUF with transcribe.cpp/Vulkan. The Linux edition aligns exact voice-job text to a master WAV and exports per-line WAVs. Media stays local.
 
 Highlights:
 
@@ -310,3 +310,25 @@ python -m src.gal_cutter_cli --audio D:\voice\batch.wav --manifest D:\voice\batc
 Optional flags: `--meta`, `--asr-qa`, `--device cuda:0`, `--silence-threshold-db`, `--min-silence-ms`, `--pre-roll-ms`, `--post-roll-ms`, `--tagged-event-padding-ms`, `--no-fine-silence`. The Forced Aligner model is downloaded separately via the Gal page (ModelScope in China or Hugging Face internationally), or supplied with `QWEN_FORCED_ALIGNER_MODEL_PATH`. Neither weights nor final voice WAVs are bundled into the app. Gal Cutter is unavailable in the Vulkan-only package; normal Vulkan STT is unchanged.
 
 Batches over 295 seconds are rejected; target 240 seconds or less. Standard PCM WAV is sliced at sample boundaries without downsampling, gain or speed changes. Review any `NEEDS_REVIEW` or `ALIGNMENT_FAILED` report. Model timing and QA still require validation with a real CUDA GPU and Gemini master WAV. See [batch contract](docs/GAL_TTS_BATCH_CONTRACT.md).
+
+## Linux Gal Cutter（Fedora 44 / AMD Ryzen 7 6800HS）
+
+Linux 提供独立的 **Gal CPU** 版本，面向本机 Fedora 44 x86_64、Radeon 680M 且没有 NVIDIA CUDA 的配置。它在 CPU 上运行 Qwen3-ForcedAligner-0.6B，保留原采样率 PCM WAV 切割与报告；CPU 推理可能明显慢于 CUDA。这个发行版只开放 Gal Cutter，普通 STT 与 Vulkan worker 不包含在内，ASR QA 暂不在 CPU 版启用。模型权重需要首次单独下载，未进入 Git 或发布包。Gal Cutter 的 PCM WAV 路径不依赖 FFmpeg。
+
+GitHub Actions 的 `Linux Gal CPU build` 工作流在 Ubuntu 22.04 云端构建 `QwenScribe-GalCPU-Linux-x86_64.tar.gz`，并上传构建 artifact。Ubuntu 构建使用较旧的 glibc 基线，适合 Fedora 44；本机也可以直接从源码构建。云端 runner 无 GPU，只能验证安装、测试、打包、启动和无模型 smoke，不能验证真实配音对齐。
+
+本机源码安装与构建（需要 Python 3.12、网络和足够磁盘空间）：
+
+```bash
+python3.12 -m venv .venv-gal
+source .venv-gal/bin/activate
+python -m pip install --upgrade pip
+python -m pip install 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements-dev.txt -r requirements-linux-gal.txt
+python -m pip install --no-deps 'qwen-asr==0.0.6'
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+QWENSCRIBE_BUILD_VARIANT=gal_cpu python app.py
+bash scripts/build_linux_gal.sh
+```
+
+Fedora 图形桌面上正常启动时不需要设置 `QT_QPA_PLATFORM=offscreen`；该变量仅用于无显示器的测试。运行云端包：解压 `.tar.gz`，执行 `QwenScribe-GalCPU-Linux-x86_64/QwenScribeDesktop`。模型首次下载选择 Hugging Face，或设置 `QWEN_FORCED_ALIGNER_MODEL_PATH` 指向完整本地模型目录。CLI 可使用源码命令 `python -m src.gal_cutter_cli --device cpu ...`，或打包命令 `QwenScribeDesktop --gal-cutter-cli --device cpu --audio ... --manifest ... --output ...`。

@@ -1,0 +1,10 @@
+# Linux Gal CPU package: install qwen-asr==0.0.6 with --no-deps separately.
+# Install official PyTorch CPU wheel before this file.
+-r requirements-common.txt
+transformers==4.57.6
+accelerate==1.12.0
+nagisa==0.2.11
+librosa>=0.10,<1
+soundfile>=0.12,<1
+soynlp==0.0.493
+huggingface_hub>=0.34,<2

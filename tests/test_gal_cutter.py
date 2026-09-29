@@ -212,3 +212,15 @@ def test_asr_qa_loads_after_aligner_closes(tmp_path):
     assert all(row["state"] == "QA_PASS" for row in report["lines"])
     qa = json.loads((output / "qa_report.json").read_text())
     assert len(qa["lines"]) == 2
+
+
+def test_linux_cpu_aligner_requests_float32_device_contract(tmp_path, monkeypatch):
+    from src import forced_aligner_service as module
+    model = tmp_path / "model"
+    model.mkdir()
+    monkeypatch.setattr(module, "find_installed_model", lambda backend, directory: model)
+    service = module.ForcedAlignerService(application_directory=tmp_path, device="cpu")
+    calls = []
+    monkeypatch.setattr(service, "_request", lambda command, **payload: calls.append((command, payload)) or {})
+    service.load()
+    assert calls == [("load", {"model_source": str(model), "device": "cpu"})]

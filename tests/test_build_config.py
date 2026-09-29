@@ -35,6 +35,13 @@ def test_unknown_variant_defaults_to_full(monkeypatch: object) -> None:
     assert current_build().variant == "full"
 
 
+def test_linux_gal_cpu_variant_has_no_stt_backend(monkeypatch: object) -> None:
+    monkeypatch.setenv("QWENSCRIBE_BUILD_VARIANT", "gal_cpu")  # type: ignore[attr-defined]
+    capabilities = current_build()
+    assert capabilities.backends == frozenset()
+    assert choose_supported_backend(None, capabilities) == ("gal_cpu", False)
+
+
 def test_diagnostic_reports_declared_capabilities(tmp_path: Path, monkeypatch: object) -> None:
     monkeypatch.setenv("QWENSCRIBE_BUILD_VARIANT", "vulkan")  # type: ignore[attr-defined]
     report = diagnostic(tmp_path)
